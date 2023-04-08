@@ -1611,6 +1611,7 @@ begin
  //queue
 
  lib^.set_proc($0F439D14C8E9E3A2,@ps4_sceKernelCreateEqueue);
+ lib^.set_proc($8E91639A0002E401,@ps4_sceKernelDeleteEqueue);
  lib^.set_proc($7F3C8C2ACF648A6D,@ps4_sceKernelWaitEqueue);
 
  lib^.set_proc($E11EBF3AF2367040,@ps4_sceKernelAddUserEvent);
@@ -1727,7 +1728,8 @@ begin
 
  lib^.set_proc($F27635F5B2A88999,@ps4_fcntl);
 
- lib^.set_proc($3DF71C4FBA944581,@ps4_ioctl);
+ lib^.set_proc($3DF71C4FBA944581,@ps4_ioctl); //ioctl
+ lib^.set_proc($C16FA4DB57266F04,@ps4_ioctl); //_ioctl
 
  lib^.set_proc($13A6A8DF8C0FC3E5,@ps4_stat);
  lib^.set_proc($795F70003DAB8880,@ps4_sceKernelStat);
