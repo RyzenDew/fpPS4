@@ -218,6 +218,32 @@ begin
  Result:=0;
 end;
 
+function ps4_sceKernelGetModuleInfo2(handle:Integer;info:pSceKernelModuleInfo):Integer; SysV_ABI_CDecl;
+var
+ node:TElf_node;
+begin
+ Result:=0;
+ //Almost the same sceKernelGetModuleInfo
+ if (info=nil) then Exit(SCE_KERNEL_ERROR_EFAULT);
+ _sig_lock;
+ Writeln('sceKernelGetModuleInfo2:',handle,':',HexStr(info));
+ node:=ps4_app.AcqureFileByHandle(handle);
+ if (node=nil) then
+ begin
+  _sig_unlock;
+  Exit(SCE_KERNEL_ERROR_ESRCH);
+ end;
+ info^:=node.GetModuleInfo;
+
+ if (info^.segmentCount=0) then
+ begin
+  Result:=SCE_KERNEL_ERROR_EPERM;
+ end;
+
+ node.Release;
+ _sig_unlock;
+end;
+
 function ps4_sceKernelGetModuleInfoForUnwind(addr:Pointer;flags:DWORD;info:pSceModuleInfoForUnwind):Integer; SysV_ABI_CDecl;
 var
  node:TElf_node;
@@ -776,7 +802,7 @@ begin
  _sig_unlock;
 end;
 
-Function ps4_sceKernelGetModuleList(list:PInteger;numArray:QWORD;actualNum:PQWORD):Integer; SysV_ABI_CDecl;
+Function GetModuleList(list:PInteger;numArray:QWORD;actualNum:PQWORD):Integer;
 var
  i:QWORD;
  node:TElf_node;
@@ -805,8 +831,29 @@ begin
 
  actualNum^:=i;
  if (i>numArray) then Result:=SCE_KERNEL_ERROR_ENOMEM;
+end;
 
- Writeln('sceKernelGetModuleList:',HexStr(list),' ',numArray,' ',i);
+Function ps4_sceKernelGetModuleList(list:PInteger;numArray:QWORD;actualNum:PQWORD):Integer; SysV_ABI_CDecl;
+begin
+ Result:=GetModuleList(list,numArray,actualNum);
+
+ Writeln('sceKernelGetModuleList:',HexStr(list),' ',numArray);
+end;
+
+Function ps4_sceKernelGetModuleList2(list:PInteger;numArray:QWORD;actualNum:PQWORD):Integer; SysV_ABI_CDecl;
+begin
+ //alias?
+ Result:=GetModuleList(list,numArray,actualNum);
+
+ Writeln('sceKernelGetModuleList2:',HexStr(list),' ',numArray);
+end;
+
+Function ps4_sceKernelGetModuleListInternal(list:PInteger;numArray:QWORD;actualNum:PQWORD):Integer; SysV_ABI_CDecl;
+begin
+ //alias?
+ Result:=GetModuleList(list,numArray,actualNum);
+
+ Writeln('sceKernelGetModuleListInternal:',HexStr(list),' ',numArray);
 end;
 
 const
@@ -1249,7 +1296,10 @@ begin
 
  lib^.set_proc($C33BEA4F852A297F,@ps4_sceKernelLoadStartModule);
  lib^.set_proc($1A0DFEC962FA0D65,@ps4_sceKernelLoadStartModuleForSysmodule);
+
  lib^.set_proc($22EC6752E5E4E818,@ps4_sceKernelGetModuleList);
+ lib^.set_proc($BBE9A55245A95376,@ps4_sceKernelGetModuleListInternal);
+
  lib^.set_proc($2F01BC8379E2AB00,@ps4_sceKernelDlsym);
 
  lib^.set_proc($54EC7C3469875D3B,@ps4_sceKernelGetCpumode);
@@ -1645,6 +1695,9 @@ begin
  lib^.set_proc($9FCF2FC770B99D6F,@ps4_gettimeofday);
  lib^.set_proc($B26223EDEAB3644F,@ps4_clock_getres);
  lib^.set_proc($94B313F6F240724D,@ps4_clock_gettime);
+
+ lib^.set_proc($C1161503966896CA,@ps4_sceKernelClockGetres);
+
  lib^.set_proc($7A37A471A35036AD,@ps4_sceKernelGettimeofday);
  lib^.set_proc($90E7277ABCA99D00,@ps4_sceKernelGettimezone);
 
@@ -1763,11 +1816,15 @@ begin
 
  lib^.set_proc($BA5E7B86F9BA9817,@ps4_sceKernelGetOpenPsIdForSystem);
 
+ //
+
  px:=Result._add_lib('libScePosix');
  px^.MapSymbol:=lib^.MapSymbol;
 
  px:=Result._add_lib('libkernel_cpumode_platform');
  px^.MapSymbol:=lib^.MapSymbol;
+
+ //
 
  lib:=Result._add_lib('libkernel_unity');
 
@@ -1778,14 +1835,25 @@ begin
  px:=Result._add_lib('libkernel_exception');
  px^.MapSymbol:=lib^.MapSymbol;
 
+ //
+
  lib:=Result._add_lib('libSceCoredump');
 
  lib^.set_proc($F332D27C47D6E405,@ps4_sceCoredumpRegisterCoredumpHandler);
  lib^.set_proc($7C59213A0CED8820,@ps4_sceCoredumpUnregisterCoredumpHandler);
 
+ //
+
  lib:=Result._add_lib('libSceOpenPsId');
 
  lib^.set_proc($0CB39172BA14A9B7,@ps4_sceKernelGetOpenPsId);
+
+ //
+
+ lib:=Result._add_lib('libkernel_module_info');
+
+ lib^.set_proc($420B0A1147E4A8C0,@ps4_sceKernelGetModuleInfo2);
+ lib^.set_proc($673CC2DD91950247,@ps4_sceKernelGetModuleList2);
 
  //
  _kernel_init;
