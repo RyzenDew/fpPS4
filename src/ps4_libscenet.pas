@@ -12,6 +12,14 @@ uses
 
 implementation
 
+const
+ SCE_NET_EINVAL      =22;
+ SCE_NET_ENOSPC      =28;
+ SCE_NET_EAFNOSUPPORT=47;
+
+ SCE_NET_EHOSTUNREACH=65;
+
+
 threadvar
  sce_net_errno:Integer;
 
@@ -103,35 +111,31 @@ end;
 
 function ps4_sceNetPoolCreate(name:PChar;size,flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetPoolCreate:',name,':',size,':',flags);
+ //Writeln('sceNetPoolCreate:',name,':',size,':',flags);
  Result:=2; // iNetLibId
 end;
 
 function ps4_sceNetPoolDestroy(memid:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetPoolDestroy:',memid);
+ //Writeln('sceNetPoolDestroy:',memid);
  Result:=0;
 end;
 
 function ps4_sceNetResolverCreate(name:PChar;memid,flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetResolverCreate:',name,':',memid);
+ //Writeln('sceNetResolverCreate:',name,':',memid);
  Result:=111;
 end;
 
 function ps4_sceNetEpollCreate(name:PChar;flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetEpollCreate:',name,':',flags);
+//Writeln('sceNetEpollCreate:',name,':',flags);
  Result:=3;
 end;
 
 const
  AF_INET = 2;
  AF_INET6=28;
-
- SCE_NET_EINVAL      =22;
- SCE_NET_ENOSPC      =28;
- SCE_NET_EAFNOSUPPORT=47;
 
 function ps4_sceNetInetPton(af:Integer;
                             src:Pchar;
@@ -347,15 +351,14 @@ begin
  Result:=0;
 end;
 
-//function ps4_sceNetGetsockopt(s:Integer; level:Integer; optname:Integer; optval:Pointer; optlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
-//begin
-// Result:=0;
-//end;
+function ps4_sceNetGetsockopt(s:Integer; level:Integer; optname:Integer; optval:Pointer; optlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
+begin
+ Result:=0;
+end;
 
 function ps4_sceNetResolverStartAton(rid:Integer; const addr:pSceNetInAddr; hostname:PChar; hostname_len:Integer; timeout:Integer; retry:Integer; flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetResolveStartAton:',hostname,':',flags);
- Result:=0;
+ Exit(_set_net_errno(SCE_NET_EHOSTUNREACH));
 end;
 
 function ps4_sceNetResolverDestroy(rid:Integer):Integer; SysV_ABI_CDecl;
@@ -655,7 +658,7 @@ begin
  lib^.set_proc($A501A91D8A290086,@ps4_sceNetNtohl);
  lib^.set_proc($45BBEDFB9636884C,@ps4_sceNetNtohs);
  lib^.set_proc($655C38E9BB1AB009,@ps4_sceNetEpollControl);
- //lib^.set_proc($C6986B66EB25EFC1,@ps4_sceNetGetsockopt);
+ lib^.set_proc($C6986B66EB25EFC1,@ps4_sceNetGetsockopt);
  lib^.set_proc($0296F8603C4AB112,@ps4_sceNetResolverStartAton);
  lib^.set_proc($9099581F9B8C0162,@ps4_sceNetResolverDestroy);
  lib^.set_proc($3975D7E26524DEE9,@ps4_sceNetConnect);
