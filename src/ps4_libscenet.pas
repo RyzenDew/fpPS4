@@ -12,6 +12,9 @@ uses
 
 implementation
 
+uses
+ ps4_time;
+
 const
  SCE_NET_EINVAL      =22;
  SCE_NET_ENOSPC      =28;
@@ -64,7 +67,7 @@ type
  SceNetSockaddr = packed record
   sa_len:Byte;
   sa_family:SceNetSaFamily;
-  sa_data:array[0..13] of Char;
+  sa_data:array[0..13] of Byte;
  end;
 
 type
@@ -284,11 +287,26 @@ begin
  Result:=0;
 end;
 
+const
+ default_addr:SceNetSockaddr=(
+  sa_len   :SizeOf(SceNetSockaddr);
+  sa_family:AF_INET;
+  sa_data  :(80,0,1,1,1,1,0,0,0,0,0,0,0,0);
+ );
+
 function ps4_sceNetAccept(s:Integer;
                           addr:pSceNetSockaddr;
                           paddrlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
 begin
  Result:=0;
+ if (addr<>nil) then
+ begin
+  addr^:=default_addr;
+ end;
+ if (paddrlen<>nil) then
+ begin
+  paddrlen^:=SizeOf(SceNetSockaddr);
+ end;
 end;
 
 function ps4_sceNetRecv(s:Integer;
@@ -296,7 +314,7 @@ function ps4_sceNetRecv(s:Integer;
                         len:size_t;
                         flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetRecv:',flags);
+ //Writeln('sceNetRecv:',flags);
  Result:=0;
 end;
 
@@ -305,7 +323,7 @@ function ps4_sceNetSend(s:Integer;
                         len:size_t;
                         flags:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetSend',flags);
+ //Writeln('sceNetSend',flags);
  Result:=0;
 end;
 
@@ -316,13 +334,21 @@ function ps4_sceNetRecvfrom(s:Integer;
                             addr:pSceNetSockaddr;
                             paddrlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetRecvfrom:',flags);
+ //Writeln('sceNetRecvfrom:',flags);
  Result:=0;
+ if (addr<>nil) then
+ begin
+  addr^:=default_addr;
+ end;
+ if (paddrlen<>nil) then
+ begin
+  paddrlen^:=SizeOf(SceNetSockaddr);
+ end;
 end;
 
 function ps4_sceNetShutdown(s:Integer;how:Integer):Integer; SysV_ABI_CDecl;
 begin
- Writeln('sceNetShutdown:',how);
+ //Writeln('sceNetShutdown:',how);
  Result:=0;
 end;
 
@@ -334,6 +360,14 @@ end;
 function ps4_sceNetGetsockname(s:Integer; addr:pSceNetSockaddr; paddrlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
 begin
  Result:=0;
+ if (addr<>nil) then
+ begin
+  addr^:=default_addr;
+ end;
+ if (paddrlen<>nil) then
+ begin
+  paddrlen^:=SizeOf(SceNetSockaddr);
+ end;
 end;
 
 function ps4_sceNetNtohl(net32:DWORD):DWORD; SysV_ABI_CDecl;
@@ -351,14 +385,32 @@ begin
  Result:=0;
 end;
 
+const
+ SCE_NET_SO_SNDBUF=$1001;
+ SCE_NET_SO_RCVBUF=$1002;
+
 function ps4_sceNetGetsockopt(s:Integer; level:Integer; optname:Integer; optval:Pointer; optlen:pSceNetSocklen_t):Integer; SysV_ABI_CDecl;
 begin
  Result:=0;
+
+ if (optval<>nil) then
+ case optname of
+  SCE_NET_SO_SNDBUF:PInteger(optval)^:=32768;
+  SCE_NET_SO_RCVBUF:PInteger(optval)^:=65536;
+  else;
+ end;
 end;
 
 function ps4_sceNetResolverStartAton(rid:Integer; const addr:pSceNetInAddr; hostname:PChar; hostname_len:Integer; timeout:Integer; retry:Integer; flags:Integer):Integer; SysV_ABI_CDecl;
+const
+ chost:PChar='123.site.com'#0;
 begin
- Exit(_set_net_errno(SCE_NET_EHOSTUNREACH));
+ Result:=0;
+
+ ps4_usleep(100);
+
+ FillChar(hostname^,hostname_len,0);
+ Move(chost^,hostname^,Length(chost));
 end;
 
 function ps4_sceNetResolverDestroy(rid:Integer):Integer; SysV_ABI_CDecl;
@@ -373,6 +425,7 @@ end;
 
 function ps4_sceNetEpollWait(s:Integer; events:pSceNetEpollEvent; maxevents:Integer; timeout:Integer):Integer; SysV_ABI_CDecl;
 begin
+ ps4_usleep(timeout);
  Result:=0;
 end;
 
