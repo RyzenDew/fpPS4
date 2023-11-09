@@ -362,6 +362,9 @@ Function me_test_mem(node:PvMeWaitMemInfo):Boolean;
 var
  val,ref:DWORD;
 begin
+ //Writeln('me_test_mem:0x',HexStr(node^.adr));
+
+
  val:=PDWORD(node^.adr)^ and node^.mask;
  ref:=node^.ref;
  Case node^.cFunc of
@@ -831,6 +834,7 @@ end;
 
 procedure onPfpSyncMe(pm4Hdr:PM4_TYPE_3_HEADER;Body:Pointer);
 begin
+ sleep(1);
  //wait ME idle in PFP
 end;
 
@@ -919,7 +923,7 @@ begin
     end;
    end;
   else
-   Assert(False);
+   {Assert(False)};
  end;
 end;
 
@@ -972,7 +976,7 @@ begin
  {$ifdef ww}writeln;{$endif}
 end;
 
-procedure onWaitRegMem(pm4Hdr:PM4_TYPE_3_HEADER;Body:PPM4CMDWAITREGMEM);
+procedure onWaitRegMem(var pm4Hdr:PM4_TYPE_3_HEADER;Body:PPM4CMDWAITREGMEM);
 var
  adr:Pointer;
 begin
@@ -1004,6 +1008,17 @@ begin
        begin
 
         QWORD(adr):=QWORD(Body^.pollAddressLo) or (QWORD(Body^.pollAddressHi) shl $20);
+
+        //   PPM4_TYPE_3_HEADER(Pointer(Body)-4)^.count:=;
+
+        // 0xC0044700  B403BE18
+
+        if DWORD(Body^.pollAddressHi)=DWORD($C0044700) then
+        begin
+         pm4Hdr.count:=1;
+         Writeln('WAIT_REG_MEM_SPACE_MEMORY:0x',HexStr(adr));
+         Exit;
+        end;
 
         GFXMicroEngine.PushCmd(GFXRing.CmdBuffer);
         GFXMicroEngine.PushWaitMem(adr,Body^.reference,Body^.mask,Body^.compareFunc);
@@ -2596,6 +2611,8 @@ var
 begin
  if (node=nil) then Exit;
 
+ {$ifdef ww}Writeln('[gfx_cp_parser]');{$endif}
+
  n:=0;
  While (n<node^.count) do
  begin
@@ -2616,6 +2633,12 @@ begin
    case PM4_TYPE(token) of
     0:begin //PM4_TYPE_0
        onPm40(PM4_TYPE_0_HEADER(token),@PDWORD(P)[1]);
+
+       //t:=(PM4_TYPE_0_HEADER(token).count+1)*sizeof(DWORD);
+       //P:=P+t;
+       //i:=i+t;
+
+       //Continue;
       end;
     2:begin //PM4_TYPE_2
        onPm42(PM4_TYPE_2_HEADER(token));
@@ -2756,7 +2779,8 @@ begin
         else
          begin
           Writeln('PM4_TYPE_3.opcode:0x',HexStr(PM4_TYPE_3_HEADER(token).opcode,2));
-          Assert(False);
+          //Assert(False);
+          //0xC0
          end;
        end;
 
@@ -2773,9 +2797,11 @@ begin
     else
      begin
       Writeln('PM4_TYPE_',PM4_TYPE(token));
-      Assert(False);
+      //Assert(False);
      end;
    end;
+
+   {$ifdef ww}Writeln('PM4_LENGTH_DW(token):',PM4_LENGTH_DW(token),':0x',HexStr(token,8)){$endif};
 
    t:=PM4_LENGTH_DW(token)*sizeof(DWORD);
    P:=P+t;
