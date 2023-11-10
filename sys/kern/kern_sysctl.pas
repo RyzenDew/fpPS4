@@ -155,16 +155,18 @@ implementation
 uses
  errno,
  systm,
- vfile,
  vmparam,
  vm_map,
  kern_thr,
  kern_sx,
  time,
+ elf64,
+ subr_dynlib,
  kern_authinfo,
  md_arc4random,
  kern_proc,
- md_proc;
+ md_proc,
+ subr_backtrace;
 
 var
  sysctllock   :t_sx;
@@ -361,7 +363,7 @@ begin
 
  pid:=PInteger(arg1)^;
 
- if (pid<>g_pid) then Exit(EINVAL);
+ if (pid<>p_proc.p_pid) then Exit(EINVAL);
 
  //sceSblACMgrIsSystemUcred()!=0 -> any proc
  //sceSblACMgrIsSystemUcred()==0 -> cur proc
@@ -392,6 +394,71 @@ end;
 function sysctl_kern_proc_ptc(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
 begin
  Result:=SYSCTL_OUT(req,@p_proc.p_ptc,SizeOf(Int64));
+end;
+
+function _copy_libkernel_addr(req:p_sysctl_req):Integer;
+var
+ addr_out:array[0..1] of Pointer;
+begin
+ addr_out[0]:=p_proc.libkernel_start_addr;
+ addr_out[1]:=p_proc.libkernel___end_addr;
+
+ Result:=SYSCTL_OUT(req,@addr_out,SizeOf(addr_out));
+end;
+
+function sysctl_kern_text_segment(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+var
+ addr_out:array[0..1] of Pointer;
+ libc_param:TSceLibcParam;
+ sceLibcHeapDebugFlags:Integer;
+begin
+ Result:=0;
+
+ addr_out[0]:=nil;
+ addr_out[1]:=nil;
+
+ if false then //sceSblACMgrIsShellcoreProces
+               //sceSblACMgrIsSystemUcred     && sceRegMgrSrvGetQAFforReg   && sceRegMgrGetInt(sys_heap_trace)
+               //sceSblACMgrIsWebcoreProcess  && sceKernelIsDevelopmentMode
+               //sceRegMgrSrvGetQAFforReg     && sceRegMgrGetInt(game_heap_trace)
+               //sceKernelIsDevelopmentMode   && sceKernelIsAssistMode      && sceRegMgrGetInt(game_intmem_dbg)
+ begin
+  Exit(_copy_libkernel_addr(req));
+ end;
+
+ Result:=copy_libc_param(@libc_param);
+
+ if (Result=0) then
+ if (libc_param.entry_count>8) then
+ begin
+
+  if (libc_param.SceLibcInternalHeap=1) then
+  begin
+   Result:=copyin(libc_param.sceLibcHeapDebugFlags,@sceLibcHeapDebugFlags,4);
+   if (Result=0) and ((sceLibcHeapDebugFlags and 8)<>0) then
+   begin
+    Exit(_copy_libkernel_addr(req));
+   end else
+   begin
+    Result:=0;
+   end;
+  end;
+
+  if (libc_param.entry_count > 11) and (libc_param.SceLibcInternalHeap=1) then
+  begin
+   Result:=copyin(libc_param.sceKernelInternalMemoryDebugFlags,@sceLibcHeapDebugFlags,4);
+   if (Result=0) and ((sceLibcHeapDebugFlags and 8)<>0) then
+   begin
+    Exit(_copy_libkernel_addr(req));
+   end else
+   begin
+    Result:=0;
+   end;
+  end;
+
+ end;
+
+ SYSCTL_OUT(req,@addr_out,SizeOf(addr_out));
 end;
 
 function sysctl_handle_int(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
@@ -489,6 +556,7 @@ begin
     end;
 
   else
+   print_backtrace_td(stderr);
    Writeln(StdErr,'Unhandled name2oid:',name);
    Assert(False);
    Result:=ENOENT;
@@ -496,8 +564,10 @@ begin
 end;
 
 function sysctl_sysctl_name2oid(oidp:p_sysctl_oid;arg1:Pointer;arg2:ptrint;req:p_sysctl_req):Integer;
+type
+ t_path=array[0..MAXPATHLEN] of AnsiChar;
 var
- new:array[0..MAXPATHLEN] of AnsiChar;
+ new:t_path;
  oid:array[0..CTL_MAXNAME-1] of Integer;
  len:Integer;
 begin
@@ -505,7 +575,7 @@ begin
 
  if (req^.newlen >= MAXPATHLEN) then Exit(ENAMETOOLONG);
 
- FillChar(new,SizeOf(new),0);
+ new:=Default(t_path);
 
  Result:=SYSCTL_IN(req, @new, req^.newlen);
  if (Result<>0) then Exit;
@@ -522,11 +592,13 @@ begin
  Result:=ENOENT;
 
  case name[0] of
-  KERN_PROC_APPINFO  :Result:=SYSCTL_HANDLE(noid,name,$C0040001,@sysctl_kern_proc_appinfo);
-  KERN_PROC_SANITIZER:Result:=SYSCTL_HANDLE(noid,name,$80040001,@sysctl_kern_proc_sanitizer);
-  KERN_PROC_PTC      :Result:=SYSCTL_HANDLE(noid,name,$90040009,@sysctl_kern_proc_ptc);
+  KERN_PROC_APPINFO     :Result:=SYSCTL_HANDLE(noid,name,$C0040001,@sysctl_kern_proc_appinfo);
+  KERN_PROC_SANITIZER   :Result:=SYSCTL_HANDLE(noid,name,$80040001,@sysctl_kern_proc_sanitizer);
+  KERN_PROC_PTC         :Result:=SYSCTL_HANDLE(noid,name,$90040009,@sysctl_kern_proc_ptc);
+  KERN_PROC_TEXT_SEGMENT:Result:=SYSCTL_HANDLE(noid,name,$80040001,@sysctl_kern_text_segment);
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_kern_proc:',name[0]);
     Assert(False);
    end;
@@ -545,6 +617,7 @@ begin
 
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_kern_smp:',name[0]);
     Assert(False);
    end;
@@ -561,6 +634,7 @@ begin
 
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_kern_sched:',name[0]);
     Assert(False);
    end;
@@ -585,6 +659,7 @@ begin
   KERN_SCHED     :Result:=sysctl_kern_sched(name+1,namelen-1,noid,req);
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_kern:',name[0]);
     Assert(False);
    end;
@@ -601,6 +676,7 @@ begin
 
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_sysctl:',name[0]);
     Assert(False);
    end;
@@ -617,6 +693,7 @@ begin
 
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_hw:',name[0]);
     Assert(False);
    end;
@@ -647,6 +724,7 @@ begin
 
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_machdep:',name[0]);
     Assert(False);
    end;
@@ -668,6 +746,7 @@ begin
   CTL_MACHDEP:Result:=sysctl_machdep(name+1,namelen-1,noid,req);
   else
    begin
+    print_backtrace_td(stderr);
     Writeln(StdErr,'Unhandled sysctl_root:',name[0]);
     Assert(False);
    end;

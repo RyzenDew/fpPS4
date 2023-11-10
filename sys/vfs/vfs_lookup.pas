@@ -7,10 +7,10 @@ interface
 
 uses
  sysutils,
+ kern_param,
  systm,
  vcapability,
  vuio,
- vfile,
  vfiledesc,
  vfcntl,
  vnode,
@@ -32,8 +32,14 @@ implementation
 uses
  errno,
  vfs_subr,
- vfs_vnops,
- dead_vnops;
+ vfs_vnops;
+
+//
+
+var
+ dead_vnodeops:vop_vector; external;
+
+//
 
 var
  vp_crossmp:p_vnode;
@@ -74,10 +80,10 @@ end;
 
 function zalloc_namei:Pointer; inline;
 begin
- Result:=AllocMem(vfile.MAXPATHLEN);
+ Result:=AllocMem(kern_param.MAXPATHLEN);
 end;
 
-function nd_namei(ndp:p_nameidata):Integer;
+function nd_namei(ndp:p_nameidata):Integer; public;
 var
  cp:PChar;  { pointer into pathname argument }
  dp:p_vnode; { the directory we are searching }
@@ -441,7 +447,7 @@ end;
  *     if WANTPARENT set, Exitunlocked parent in ni_dvp
  }
 
-function nd_lookup(ndp:p_nameidata):Integer;
+function nd_lookup(ndp:p_nameidata):Integer; public;
 var
  cp             :PChar  ;  { pointer into pathname argument }
  dp             :p_vnode;  { the directory we are searching }
@@ -1140,7 +1146,7 @@ end;
 {
  * Free data allocated by namei(); see namei(9) for details.
  }
-procedure NDFREE(ndp:p_nameidata;flags:Integer);
+procedure NDFREE(ndp:p_nameidata;flags:Integer); public;
 var
  unlock_dvp:Integer;
  unlock_vp :Integer;

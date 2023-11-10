@@ -7,21 +7,15 @@ interface
 
 uses
  mqueue,
+ kern_param,
  time,
  sys_event,
  kern_mtx,
- kern_synch,
- kern_sig,
+ //kern_synch,
+ signal,
  vnode;
 
 const
- DFLTPHYS=(64*1024);
-
- MAXFIDSZ=16;
-
- MFSNAMELEN=16; // length of type name including null
- MNAMELEN  =88; // size of on/from name bufs
-
  STATFS_VERSION=$20030518; // current version number
 
  //User specifiable flags, stored in mnt_flag.
@@ -424,6 +418,12 @@ procedure vmountinit; //SYSINIT
 
 implementation
 
+//
+
+procedure wakeup(ident:Pointer); external;
+
+//
+
 function MNT_SHARED_WRITES(mp:p_mount):Boolean; inline;
 begin
  if (mp<>nil) then
@@ -457,11 +457,13 @@ end;
 
 procedure MNT_REF(mp:p_mount); inline;
 begin
+ Assert(mp^.mnt_ref>=0);
  System.InterlockedIncrement(mp^.mnt_ref);
 end;
 
 procedure MNT_REL(mp:p_mount); inline;
 begin
+ Assert(mp^.mnt_ref>0);
  if (System.InterlockedDecrement(mp^.mnt_ref)=0) then
  begin
   wakeup(mp)
@@ -479,7 +481,7 @@ begin
  end;
 end;
 
-function VFS_LOCK_GIANT(mp:p_mount):Integer;
+function VFS_LOCK_GIANT(mp:p_mount):Integer; public;
 begin
  if VFS_NEEDSGIANT(mp) then
  begin
@@ -501,7 +503,7 @@ begin
   mtx_assert(VFS_Giant);
 end;
 
-function VFS_PROLOGUE(mp:p_mount):Boolean;
+function VFS_PROLOGUE(mp:p_mount):Boolean; public;
 begin
  if (mp<>nil) then
  begin
@@ -512,7 +514,7 @@ begin
  end;
 end;
 
-procedure VFS_EPILOGUE(_enable_stops:Boolean); inline;
+procedure VFS_EPILOGUE(_enable_stops:Boolean); public;
 begin
  if _enable_stops then sigallowstop;
 end;

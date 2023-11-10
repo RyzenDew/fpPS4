@@ -19,14 +19,14 @@ implementation
 uses
  errno,
  systm,
- trap,
+ subr_backtrace,
  vm,
- vm_object,
+ sys_vm_object,
  vm_pager,
  kern_event,
  kern_mtx,
  md_time,
- md_proc;
+ kern_proc;
 
 type
  p_flip_control_args=^t_flip_control_args;
@@ -547,7 +547,7 @@ Function dce_deregister_ident(dev:p_cdev;data:PQWORD):Integer;
 begin
  writeln('dce_deregister_ident:',HexStr(data^,16));
 
- kqueue_deregister(EVFILT_DISPLAY,g_pid,data^);
+ kqueue_deregister(EVFILT_DISPLAY,p_proc.p_pid,data^);
 
  Result:=0;
 end;
@@ -671,7 +671,7 @@ begin
   //_display_attach(&kn->kn_kevent);
  end;
 
- kn^.kn_hook:=Pointer(g_pid);
+ kn^.kn_hook:=Pointer(p_proc.p_pid);
 
  event_id:=kn^.kn_kevent.ident shr 48;
 
@@ -712,8 +712,8 @@ begin
      begin
       knlist_remove(@g_video_out_event_flip,kn,0)
      end;
-   //$0051:Result:=8;
-   //$0058:Result:=12;
+   // $0051:Result:=8;
+   // $0058:Result:=12;
   else;
  end;
 

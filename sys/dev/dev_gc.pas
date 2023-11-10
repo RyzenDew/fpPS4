@@ -17,8 +17,7 @@ uses
  kern_authinfo,
  vm,
  vmparam,
- kern_thr,
- trap;
+ subr_backtrace;
 
 var
  gc_mmap_ptr:Pointer=nil;

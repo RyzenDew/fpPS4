@@ -8,6 +8,7 @@ interface
 uses
  sysutils,
  mqueue,
+ kern_param,
  kern_thr,
  vnode,
  vuio,
@@ -39,7 +40,7 @@ uses
  vmparam,
  vm_map,
  vm_mmap,
- vm_object,
+ sys_vm_object,
  vm_pager,
  vnamei,
  vfs_lookup,
@@ -52,7 +53,7 @@ uses
  kern_descrip,
  vfs_cache,
  vnode_if,
- _resource,
+ sys_resource,
  kern_resource,
  sys_event,
  kern_event,
@@ -591,9 +592,9 @@ begin
 
  hdr:=imgp^.image_header;
 
- if (budget_ptype_caller=0) then
+ if (p_proc.p_budget_ptype=0) then
  begin
-  _2mb_mode:=((g_mode_2mb or 1)=3) or ((g_self_fixed<>0) and (g_mode_2mb=M2MB_NOTDYN_FIXED));
+  _2mb_mode:=((p_proc.p_mode_2mb or 1)=3) or ((p_proc.p_self_fixed<>0) and (p_proc.p_mode_2mb=M2MB_NOTDYN_FIXED));
  end else
  begin
   _2mb_mode:=False;
@@ -626,7 +627,7 @@ begin
    p_filesz:=phdr^.p_filesz;
    p_offset:=phdr^.p_offset;
 
-   if (p_type=PT_SCE_RELRO) and (budget_ptype_caller=0) then
+   if (p_type=PT_SCE_RELRO) and (p_proc.p_budget_ptype=0) then
    begin
 
     if (_2mb_mode=false) then
@@ -656,7 +657,7 @@ begin
      used_mode_2m:=false;
     end else
     begin
-     used_mode_2m:=is_used_mode_2mb(phdr,0,budget_ptype_caller);
+     used_mode_2m:=is_used_mode_2mb(phdr,0,p_proc.p_budget_ptype);
     end;
 
     Result:=self_load_section(imgp,
@@ -855,9 +856,6 @@ end;
 function dynlib_proc_initialize_step2(imgp:p_image_params):Integer;
 var
  obj,tail:p_lib_info;
-
- init_proc_addr:Pointer;
- fini_proc_addr:Pointer;
 begin
  Result:=0;
 
@@ -885,9 +883,6 @@ begin
  dynlibs_info.sym_zero.st_info :=(STB_GLOBAL shl 4) or STT_NOTYPE;
  dynlibs_info.sym_zero.st_shndx:=SHN_UNDEF;
  dynlibs_info.sym_zero.st_value:=-Int64(obj^.relocbase);
-
- init_proc_addr:=obj^.init_proc_addr;
- fini_proc_addr:=obj^.fini_proc_addr;
 
  obj^.fini_proc_addr:=nil;
  obj^.init_proc_addr:=nil;
@@ -939,13 +934,13 @@ begin
  obj:=nil;
 
  //if (td_proc->sdk_version < 0x5000000) {
- //  *(byte *)&dynlibs_info->bits = *(byte *)&dynlibs_info->bits | 0x20;
+ //  *(byte *)&dynlibs_info->bits = *(byte *)&dynlibs_info->bits | 0x20;  (find_symdef mode)
  //}
 
  if (imgp^.dyn_exist=0) then goto _dyn_not_exist;
 
  flags:=$40; //priv libs?
- if (budget_ptype_caller=0) then flags:=flags or $20; //vm_map_wire
+ if (p_proc.p_budget_ptype=0) then flags:=flags or $20; //vm_map_wire
 
  pick_obj(dynlibs_info.libprogram);
 
@@ -1212,7 +1207,7 @@ begin
  Exit(0);
 end;
 
-procedure init_tty;
+procedure init_tty; //TODO before execve
 begin
  kern_openat(STDIN_FILENO ,'/dev/deci_stdin' ,UIO_SYSSPACE,O_RDWR,0);
  kern_openat(STDOUT_FILENO,'/dev/deci_stdout',UIO_SYSSPACE,O_RDWR,0);
@@ -1444,16 +1439,17 @@ begin
  //copy authinfo
  g_authinfo:=imgp^.authinfo;
 
- //copy appinfo
+ //copy appinfo (TODO before execve)
  g_appinfo.mmap_flags:=g_appinfo.mmap_flags or 1; //is_big_app ???
  if (p_proc.p_sce_replay_exec<>0) then
  begin
   g_appinfo.mmap_flags:=g_appinfo.mmap_flags or 2; //is_system ???
  end;
+ g_appinfo.AppType:=SCE_LNC_APP_TYPE_BIG_APP;
 
  //TODO load CUSANAME
 
- //init std tty
+ //init std tty (TODO before execve)
  init_tty;
 
  {

@@ -19,8 +19,8 @@ uses
  vm,
  dmem_map,
  kern_dmem,
- vm_object,
- trap;
+ sys_vm_object,
+ subr_backtrace;
 
 type
  PAvailableDirectMemorySize=^TAvailableDirectMemorySize;

@@ -7,6 +7,7 @@ interface
 
 uses
  mqueue,
+ kern_param,
  vnode,
  vmount,
  vdirent,
@@ -218,7 +219,9 @@ var
 begin
  not_found:=0;
  if ((de^.ufs_flags and UFS_DOOMED)<>0) then
+ begin
   not_found:=1;
+ end;
 
  ufs_de_drop(de);
 
@@ -229,7 +232,9 @@ begin
  end;
 
  if (not_found=1) or ((drop_lock<>0) and (not_found<>2)) then
+ begin
   sx_unlock(@dmp^.ufs_lock);
+ end;
 
  Exit(not_found);
 end;
@@ -376,7 +381,9 @@ begin
 
  error:=ufs_allocv(dmp^.ufs_rootdir, mp, LK_EXCLUSIVE, @vp);
  if (error<>0) then
+ begin
   Exit(error);
+ end;
 
  vp^.v_vflag:=vp^.v_vflag or VV_ROOT;
  vpp^:=vp;
@@ -514,7 +521,9 @@ begin
 
  error:=vflush(mp, 1, flags);
  if (error<>0) then
+ begin
   Exit(error);
+ end;
 
  sx_xlock(@fmp^.ufs_lock);
 

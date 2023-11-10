@@ -7,6 +7,7 @@ interface
 
 uses
  mqueue,
+ kern_param,
  vnode,
  vmount,
  nullfs,
@@ -60,7 +61,6 @@ uses
  vuio,
  vnamei,
  vfs_mount,
- vfs_lookup,
  vfs_vnops,
  vfs_subr,
  vnode_if,

@@ -127,6 +127,9 @@ const
  SW_INVOL  =$0200; // Involuntary switch.
  SW_PREEMPT=$0400; // The invol switch is a preemption
 
+ PCB_FULL_IRET=1;
+ PCB_IS_JIT   =2;
+
 type
  p_teb=^teb;
  teb=packed record
@@ -136,26 +139,26 @@ type
   _align1:array[0..20] of QWORD;
   jitcall:Pointer;                 //0x0C0
   _align2:array[0..30] of QWORD;
-  gsbase :Pointer;                 //0x1C0
-  jit_rsp:Pointer;                 //0x1C8
-  jit_rax:Pointer;                 //0x1D0
+  thread :Pointer;                 //0x1C0
+  fsbase :Pointer;                 //0x1C8
+  gsbase :Pointer;                 //0x1D0
   _align3:array[0..164] of QWORD;
-  thread :Pointer;                 //0x700
-  tcb    :Pointer;                 //0x708
+  jit_rsp:Pointer;                 //0x700
+  jit_rbp:Pointer;                 //0x708
   iflag  :Integer;                 //0x710
  end;
 
 const
  teb_jitcall=ptruint(@teb(nil^).jitcall);
- teb_gsbase =ptruint(@teb(nil^).gsbase );
  teb_thread =ptruint(@teb(nil^).thread );
- teb_tcb    =ptruint(@teb(nil^).tcb    );
+ teb_fsbase =ptruint(@teb(nil^).fsbase );
+ teb_gsbase =ptruint(@teb(nil^).gsbase );
+ teb_jit_rsp=ptruint(@teb(nil^).jit_rsp);
  teb_iflag  =ptruint(@teb(nil^).iflag  );
 
  {$IF teb_jitcall<>$0C0}{$STOP teb_jitcall<>$0C0}{$ENDIF}
- {$IF teb_gsbase <>$1C0}{$STOP teb_gsbase <>$1C0}{$ENDIF}
- {$IF teb_thread <>$700}{$STOP teb_thread <>$700}{$ENDIF}
- {$IF teb_tcb    <>$708}{$STOP teb_tcb    <>$708}{$ENDIF}
+ {$IF teb_thread <>$1C0}{$STOP teb_thread <>$1C0}{$ENDIF}
+ {$IF teb_jit_rsp<>$700}{$STOP teb_jit_rsp<>$700}{$ENDIF}
  {$IF teb_iflag  <>$710}{$STOP teb_iflag  <>$710}{$ENDIF}
 
 type
@@ -164,6 +167,11 @@ type
  t_td_stack=packed record
   stack:Pointer;
   sttop:Pointer;
+ end;
+
+ p_td_jctx=^t_td_jctx;
+ t_td_jctx=packed record
+  block:Pointer;
  end;
 
  pp_kthread=^p_kthread;
@@ -194,11 +202,11 @@ type
   td_sigmask      :sigset_t;
   td_oldsigmask   :sigset_t;
   td_sigqueue     :sigqueue_t;
-  td_frame        :trapframe;
-  td_fpstate      :array[0..103] of QWORD;
-  pcb_fsbase      :Pointer;
-  pcb_gsbase      :Pointer;
   td_retval       :array[0..1] of QWORD;
+  td_align        :Pointer;
+  td_frame        :trapframe;
+  td_fpstate      :t_fpstate;
+  td_jctx         :t_td_jctx;
   td_ustack       :t_td_stack;
   td_kstack       :t_td_stack;
   //
@@ -224,10 +232,19 @@ type
   td_rmap_def_user:Pointer;
   td_sel          :Pointer;
   td_vp_reserv    :Int64;
+  pcb_fsbase      :Pointer;
+  pcb_gsbase      :Pointer;
   pcb_onfault     :Pointer;
-  td_jit_ctx      :Pointer;
  end;
 
+const
+ kthread_fpstate=ptruint(@kthread(nil^).td_fpstate);
+
+ {$IF (kthread_fpstate mod 64)<>0}
+  {$STOP kthread.td_fpstate must be 64 aligned}
+ {$ENDIF}
+
+type
  p_thr_param=^thr_param;
  thr_param=packed record
   start_func:Pointer;
@@ -248,6 +265,23 @@ type
 
 function  curkthread:p_kthread;
 procedure set_curkthread(td:p_kthread);
+
+const
+ SIG_ALTERABLE=$80000000;
+ SIG_STI_LOCK =$40000000;
+
+ NOT_PCB_FULL_IRET=not PCB_FULL_IRET;
+ NOT_SIG_ALTERABLE=not SIG_ALTERABLE;
+ NOT_SIG_STI_LOCK =not SIG_STI_LOCK;
+
+ TDF_AST=TDF_ASTPENDING or TDF_NEEDRESCHED;
+
+procedure sig_sta; assembler;
+procedure sig_cla; assembler;
+procedure sig_sti; assembler;
+procedure sig_cli; assembler;
+
+procedure set_pcb_flags(td:p_kthread;f:Integer);
 
 function  TD_IS_SLEEPING(td:p_kthread):Boolean;
 function  TD_ON_SLEEPQ(td:p_kthread):Boolean;
@@ -285,6 +319,9 @@ function  curthread_pflags_set(flags:Integer):Integer;
 procedure curthread_pflags_restore(save:Integer);
 procedure curthread_set_pcb_onfault(v:Pointer);
 
+procedure thread_lock(td:p_kthread);   external;
+procedure thread_unlock(td:p_kthread); external;
+
 implementation
 
 function curkthread:p_kthread; assembler; nostackframe;
@@ -295,6 +332,31 @@ end;
 procedure set_curkthread(td:p_kthread); assembler; nostackframe;
 asm
  movqq td,%gs:teb.thread
+end;
+
+procedure sig_sta; assembler; nostackframe;
+asm
+ lock orl SIG_ALTERABLE,%gs:teb.iflag
+end;
+
+procedure sig_cla; assembler; nostackframe;
+asm
+ lock andl NOT_SIG_ALTERABLE,%gs:teb.iflag
+end;
+
+procedure sig_sti; assembler; nostackframe;
+asm
+ lock orl SIG_STI_LOCK,%gs:teb.iflag
+end;
+
+procedure sig_cli; assembler; nostackframe;
+asm
+ lock andl NOT_SIG_STI_LOCK,%gs:teb.iflag
+end;
+
+procedure set_pcb_flags(td:p_kthread;f:Integer);
+begin
+ td^.pcb_flags:=f or (td^.pcb_flags and PCB_IS_JIT);
 end;
 
 function TD_IS_SLEEPING(td:p_kthread):Boolean;

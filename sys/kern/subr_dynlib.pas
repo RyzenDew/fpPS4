@@ -250,6 +250,7 @@ type
   flag:ptruint;
  end;
 
+function  dynlibs_locked:Boolean;
 procedure dynlibs_lock;
 procedure dynlibs_unlock;
 
@@ -343,6 +344,9 @@ function  find_obj_by_name  (name:pchar):p_lib_info;
 
 function  dynlib_load_needed_shared_objects():Integer;
 
+function  copy_proc_param(pout:pSceProcParam):Integer;
+function  copy_libc_param(pout:pSceLibcParam):Integer;
+
 var
  dynlibs_info:t_dynlibs_info;
 
@@ -355,11 +359,12 @@ implementation
 uses
  errno,
  systm,
+ subr_backtrace,
  vm,
  vmparam,
  vm_map,
  vm_mmap,
- vm_object,
+ sys_vm_object,
  vm_pager,
  vuio,
  vstat,
@@ -371,11 +376,22 @@ uses
  vfs_subr,
  vnode_if,
  kern_proc,
- kern_reloc,
  kern_namedobj,
  elf_nid_utils,
- kern_jit2,
- kern_jit2_ctx;
+ kern_jit,
+ kern_jit_ctx;
+
+//
+
+function relocate_one_object(obj:p_lib_info;jmpslots,export_only:Boolean):Integer; external;
+function dynlib_unlink_imported_symbols_each(root,obj:p_lib_info):Integer; external;
+
+//
+
+function dynlibs_locked:Boolean;
+begin
+ Result:=sx_xlocked(@dynlibs_info.lock);
+end;
 
 procedure dynlibs_lock;
 begin
@@ -1737,9 +1753,9 @@ begin
  text_addr :=0;
  text_size :=0;
 
- if (budget_ptype_caller=0) then
+ if (p_proc.p_budget_ptype=0) then
  begin
-  _2mb_mode:=((g_mode_2mb or 1)=3);
+  _2mb_mode:=((p_proc.p_mode_2mb or 1)=3);
  end else
  begin
   _2mb_mode:=False;
@@ -1775,7 +1791,7 @@ begin
      used_mode_2m:=false;
     end else
     begin
-     used_mode_2m:=is_used_mode_2mb(phdr,1,budget_ptype_caller);
+     used_mode_2m:=is_used_mode_2mb(phdr,1,p_proc.p_budget_ptype);
     end;
 
     Result:=self_load_section(imgp,
@@ -1797,7 +1813,7 @@ begin
      used_mode_2m:=false;
     end else
     begin
-     used_mode_2m:=is_used_mode_2mb(phdr,1,budget_ptype_caller);
+     used_mode_2m:=is_used_mode_2mb(phdr,1,p_proc.p_budget_ptype);
     end;
 
     Result:=self_load_section(imgp,
@@ -2001,7 +2017,7 @@ begin
    end;
  end;
 
- budget:=budget_ptype_caller;
+ budget:=p_proc.p_budget_ptype;
 
  if is_system_path(path) then
  begin
@@ -2738,12 +2754,12 @@ begin
  ctx.text___end:=ctx.text_start+obj^.text_size;
  ctx.map____end:=ctx.text_start+obj^.map_size;
 
- ctx.add_forward_point(obj^.entry_addr);
+ ctx.add_forward_point(fpCall,obj^.entry_addr);
 
  if (obj^.rtld_flags.mainprog=0) then
  begin
-  ctx.add_forward_point(obj^.init_proc_addr);
-  ctx.add_forward_point(obj^.fini_proc_addr);
+  ctx.add_forward_point(fpCall,obj^.init_proc_addr);
+  ctx.add_forward_point(fpCall,obj^.fini_proc_addr);
  end;
 
  lib_entry:=TAILQ_FIRST(@obj^.lib_table);
@@ -2769,7 +2785,7 @@ begin
         begin
          addr:=obj^.relocbase + symp^.st_value;
 
-         ctx.add_forward_point(addr);
+         ctx.add_forward_point(fpCall,addr);
         end;
      else;
     end; //case
@@ -2780,7 +2796,7 @@ begin
   lib_entry:=TAILQ_NEXT(lib_entry,@lib_entry^.link)
  end;
 
- kern_jit2.pick(ctx);
+ kern_jit.pick(ctx);
 end;
 
 function preload_prx_modules(path:pchar;flags:DWORD;var err:Integer):p_lib_info;
@@ -2850,6 +2866,7 @@ begin
  if (Result<>nil) then Exit;
 
  Writeln(StdErr,' prx_module_not_found:',dynlib_basename(path));
+ print_backtrace_td(stderr);
 
  err:=ENOENT;
  Exit(nil);
@@ -3167,6 +3184,62 @@ begin
 
  Result:=0;
 end;
+
+//
+
+function copy_proc_param(pout:pSceProcParam):Integer;
+var
+ proc_param_addr:pSceProcParam;
+ proc_param_size:QWORD;
+begin
+ proc_param_addr:=dynlibs_info.proc_param_addr;
+ proc_param_size:=dynlibs_info.proc_param_size;
+
+ if (proc_param_addr=nil) then Exit(ENOENT);
+
+ pout^:=Default(TSceProcParam);
+
+ if (proc_param_size>SizeOf(TSceProcParam)) then
+ begin
+  proc_param_size:=SizeOf(TSceProcParam);
+ end;
+
+ Result:=copyin(proc_param_addr,pout,proc_param_size);
+
+ if (Result=0) then
+ begin
+  if (pout^.Magic<>$4942524f) then Result:=ENOEXEC;
+ end;
+end;
+
+function copy_libc_param(pout:pSceLibcParam):Integer;
+var
+ proc_param:TSceProcParam;
+ libc_param_addr:pSceLibcParam;
+ libc_param_size:QWORD;
+begin
+ Result:=copy_proc_param(@proc_param);
+ if (Result<>0) then Exit;
+
+ if (proc_param.Entry_count=0) or
+    (proc_param.Size <= 63) or
+    (proc_param._sceLibcParam=nil) then
+ begin
+  Exit(ENOEXEC);
+ end;
+
+ libc_param_addr:=proc_param._sceLibcParam;
+
+ Result:=copyin(libc_param_addr,@libc_param_size,8);
+ if (Result<>0) then Exit;
+
+ if (libc_param_size >= 169) then Exit(EINVAL);
+
+ pout^:=Default(TSceLibcParam);
+
+ Result:=copyin(proc_param._sceLibcParam,pout,libc_param_size);
+end;
+
 
 
 end.

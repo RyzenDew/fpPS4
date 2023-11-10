@@ -25,7 +25,7 @@ uses
  sched_ule,
  md_proc;
 
-function rtp_to_pri(rtp:p_rtprio;td:p_kthread):Integer;
+function rtp_to_pri(rtp:p_rtprio;td:p_kthread):Integer; public;
 var
  newpri:Integer;
 begin
@@ -63,7 +63,7 @@ begin
  thread_unlock(td);
 end;
 
-procedure pri_to_rtp(td:p_kthread;rtp:p_rtprio);
+procedure pri_to_rtp(td:p_kthread;rtp:p_rtprio); public;
 begin
  thread_lock(td);
 
@@ -135,7 +135,7 @@ var
  rtp1,rtp2:t_rtprio;
  i:kthread_iterator;
 begin
- if (pid<>0) and (pid<>g_pid) then Exit(ESRCH);
+ if (pid<>0) and (pid<>p_proc.p_pid) then Exit(ESRCH);
 
  td:=curkthread;
 

@@ -6,6 +6,7 @@ unit vfs_syscalls;
 interface
 
 uses
+ kern_param,
  kern_proc,
  time,
  vmount,
@@ -21,8 +22,7 @@ uses
  vfs_mount,
  vnode,
  vfs_vnops,
- vfs_subr,
- vfs_lookup;
+ vfs_subr;
 
 function chroot_refuse_vdir_fds():Integer;
 function getutimes(usrtvp:p_timeval;tvpseg:uio_seg;tsp:p_timespec):Integer;
@@ -142,11 +142,11 @@ uses
  errno,
  kern_mtx,
  kern_thr,
- kern_synch,
  kern_descrip,
  vnode_if,
  sys_capability,
  vmparam,
+ sys_vm_object,
  vm_object;
 
 {
@@ -912,6 +912,7 @@ begin
 
   Exit(error);
  end;
+
  td^.td_dupfd:=0;
  vfslocked:=NDHASGIANT(@nd);
  NDFREE(@nd, NDF_ONLY_PNBUF);
@@ -1005,8 +1006,10 @@ success:
  fdrop(fp);
  td^.td_retval[0]:=indx;
  Exit(0);
+
 bad:
  VFS_UNLOCK_GIANT(vfslocked);
+
 bad_unlocked:
  if (indx<>-1) then
  begin
@@ -3307,13 +3310,15 @@ begin
 end;
 
 function sys_randomized_path(src,dst:pchar;plen:PQWORD):Integer;
+type
+ t_data=array[0..255] of AnsiChar;
 var
  ran_len:Integer;
  dst_len:QWORD;
- data:array[0..255] of AnsiChar;
+ data:t_data;
 begin
  Result:=0;
- FillChar(data,SizeOf(data),0);
+ data:=Default(t_data);
  dst_len:=0;
 
  if (src=nil) then

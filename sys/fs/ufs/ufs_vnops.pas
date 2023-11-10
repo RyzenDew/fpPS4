@@ -7,6 +7,7 @@ interface
 
 uses
  mqueue,
+ kern_param,
  time,
  vfile,
  vmount,
@@ -247,7 +248,9 @@ begin
  if (de^.ufs_dirent^.d_type<>DT_DIR) then Exit(ENOTDIR);
 
  if ((de^.ufs_flags and UFS_DOOMED)<>0) or (de=dm^.ufs_rootdir) then
+ begin
   Exit(EBUSY);
+ end;
 
  de_dot:=TAILQ_FIRST(@de^.ufs_dlist);
  Assert(de_dot<>nil, 'ufs_rmdir: . missing');
@@ -257,7 +260,9 @@ begin
 
  { Exit if the directory is not empty. }
  if (TAILQ_NEXT(de_dotdot,@de_dotdot^.ufs_list)<>nil) then
+ begin
   Exit(ENOTEMPTY);
+ end;
 end;
 
 function _ufs_rmdir(dm:p_ufs_mount;de:p_ufs_dirent):Integer;
@@ -274,7 +279,9 @@ begin
  Assert(de^.ufs_dirent^.d_type=DT_DIR,'ufs_rmdir: de is not a directory');
 
  if ((de^.ufs_flags and UFS_DOOMED)<>0) or (de=dm^.ufs_rootdir) then
+ begin
   Exit(EBUSY);
+ end;
 
  dd       :=nil;
  de_dot   :=nil;
@@ -294,7 +301,9 @@ begin
 
  { Exit if the directory is not empty. }
  if (TAILQ_NEXT(de_dotdot,@de_dotdot^.ufs_list)<>nil) then
+ begin
   Exit(ENOTEMPTY);
+ end;
 
  dd:=ufs_parent_dirent(de);
 
@@ -438,22 +447,32 @@ begin
  vpp^:=nil;
 
  if ((flags and ISLASTCN)<>0) and (nameiop=RENAME) then
+ begin
   Exit(EOPNOTSUPP);
+ end;
 
  if (dvp^.v_type<>VDIR) then
+ begin
   Exit(ENOTDIR);
+ end;
 
  if (((flags and ISDOTDOT)<>0) and ((dvp^.v_vflag and VV_ROOT)<>0)) then
+ begin
   Exit(EIO);
+ end;
 
  error:=VOP_ACCESS(dvp, VEXEC);
  if (error<>0) then
+ begin
   Exit(error);
+ end;
 
  if (cnp^.cn_namelen=1) and (pname^='.') then
  begin
   if ((flags and ISLASTCN) and nameiop<>LOOKUP) then
+  begin
    Exit(EINVAL);
+  end;
 
   vpp^:=dvp;
   VREF(dvp);
@@ -464,7 +483,9 @@ begin
  if ((flags and ISDOTDOT)<>0) then
  begin
   if ((flags and ISLASTCN)<>0) and (nameiop<>LOOKUP) then
+  begin
    Exit(EINVAL);
+  end;
 
   de:=ufs_parent_dirent(dd);
 
@@ -505,7 +526,9 @@ begin
  begin
   error:=VOP_ACCESS(dvp, VWRITE);
   if (error<>0) then
+  begin
    Exit(error);
+  end;
 
   if (vpp^=dvp) then
   begin
@@ -557,7 +580,9 @@ begin
  end;
 
  if (error<>EACCES) then
+ begin
   Exit(error);
+ end;
 
  if ((p_proc.p_flag and P_CONTROLT)=0) then
  begin
@@ -734,11 +759,15 @@ begin
  tmp_ncookies:=nil;
 
  if (ap^.a_vp^.v_type<>VDIR) then
+ begin
   Exit(ENOTDIR);
+ end;
 
  uio:=ap^.a_uio;
  if (uio^.uio_offset < 0) then
+ begin
   Exit(EINVAL);
+ end;
 
  if (ap^.a_ncookies<>nil) then
  begin
@@ -791,7 +820,9 @@ end;
 function ufs_rread(ap:p_vop_read_args):Integer;
 begin
  if (ap^.a_vp^.v_type<>VDIR) then
+ begin
   Exit(EINVAL);
+ end;
 
  Exit(VOP_READDIR(ap^.a_vp, ap^.a_uio, nil, nil, nil));
 end;

@@ -7,6 +7,7 @@ interface
 
 uses
  sysutils,
+ kern_param,
  vnode,
  vnode_if,
  vdirent,
@@ -153,7 +154,6 @@ uses
  errno,
  vfs_subr,
  vfs_vnops,
- vfs_lookup,
  vsys_generic;
 
 {

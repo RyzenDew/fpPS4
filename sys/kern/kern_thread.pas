@@ -8,13 +8,13 @@ interface
 uses
  sysutils,
  mqueue,
+ kern_param,
  kern_thr,
  ucontext,
  signal,
  signalvar,
  time,
  rtprio,
- kern_rtprio,
  hamt;
 
 type
@@ -65,18 +65,36 @@ implementation
 uses
  errno,
  systm,
+ kern_mtx,
  md_sleep,
  md_context,
  machdep,
  md_proc,
  md_thread,
  kern_rwlock,
- kern_umtx,
  kern_sig,
- kern_synch,
  kern_proc,
  sched_ule,
- subr_sleepqueue;
+ sys_sleepqueue;
+
+//
+
+procedure umtx_thread_init(td:p_kthread); external;
+procedure umtx_thread_exit(td:p_kthread); external;
+procedure umtx_thread_fini(td:p_kthread); external;
+function  kern_umtx_wake(td:p_kthread;umtx:Pointer;n_wake,priv:Integer):Integer; external;
+function  umtx_copyin_timeout(addr:Pointer;tsp:p_timespec):Integer; external;
+
+procedure jit_ctx_free(td:p_kthread);  external;
+procedure switch_to_jit(td:p_kthread); external;
+
+function  msleep(ident   :Pointer;
+                 lock    :p_mtx;
+                 priority:Integer;
+                 wmesg   :PChar;
+                 timo    :Int64):Integer; external;
+
+//
 
 var
  tidhashtbl:TSTUB_HAMT32;
@@ -189,12 +207,12 @@ begin
  end;
 end;
 
-procedure thread_lock(td:p_kthread);
+procedure thread_lock(td:p_kthread); public;
 begin
  rw_wlock(td^.td_lock);
 end;
 
-procedure thread_unlock(td:p_kthread);
+procedure thread_unlock(td:p_kthread); public;
 begin
  rw_wunlock(td^.td_lock);
 end;
@@ -334,18 +352,15 @@ begin
  ipi_sigreturn; //switch
 end;
 
-procedure main_wrapper; assembler; nostackframe;
-asm
- subq   $48, %rsp
-.seh_stackalloc 40
-.seh_endprologue
- jmpq   %gs:teb.jitcall
-
- nop
- addq   $48, %rsp
-.seh_handler __FPC_default_handler,@except,@unwind
+procedure thread0_param(td:p_kthread);
+begin
+ td^.td_base_user_pri:=700;
+ td^.td_lend_user_pri:=1023;
+ td^.td_base_pri     :=68;
+ td^.td_priority     :=68;
+ td^.td_pri_class    :=10;
+ td^.td_user_pri     :=700;
 end;
-
 
 function create_thread(td        :p_kthread; //calling thread
                        ctx       :p_mcontext_t;
@@ -424,6 +439,8 @@ begin
  newtd:=thread_alloc;
  if (newtd=nil) then Exit(ENOMEM);
 
+ thread0_param(newtd);
+
  //user stack
  newtd^.td_ustack.stack:=stack_base+stack_size;
  newtd^.td_ustack.sttop:=stack_base;
@@ -481,12 +498,15 @@ begin
   // Set upcall address to user thread entry function.
   cpu_set_upcall_kse(newtd,start_func,arg,@stack);
   // Setup user TLS address and TLS pointer register.
-  cpu_set_user_tls(newtd,tls_base);
+  cpu_set_fsbase(newtd,tls_base);
  end;
 
+ //jit wrapper
+ switch_to_jit(newtd);
+ //jit wrapper
+
  //seh wrapper
- newtd^.td_teb^.jitcall:=Pointer(newtd^.td_frame.tf_rip);
- newtd^.td_frame.tf_rip:=QWORD(@main_wrapper);
+ seh_wrapper(newtd);
  //seh wrapper
 
  if (td<>nil) then
@@ -552,6 +572,8 @@ begin
  newtd:=thread_alloc;
  if (newtd=nil) then Exit(ENOMEM);
 
+ thread0_param(newtd);
+
  stack.ss_sp  :=newtd^.td_kstack.sttop;
  stack.ss_size:=(ptruint(newtd^.td_kstack.stack)-ptruint(newtd^.td_kstack.sttop));
 
@@ -573,6 +595,14 @@ begin
  end;
 
  cpu_set_upcall_kse(newtd,func,arg,@stack);
+
+ //jit wrapper
+ switch_to_jit(newtd);
+ //jit wrapper
+
+ //seh wrapper
+ seh_wrapper(newtd);
+ //seh wrapper
 
  if (td<>nil) then
  begin
@@ -696,6 +726,8 @@ begin
 
  umtx_thread_exit(td);
 
+ jit_ctx_free(td);
+
  //free
  thread_dec_ref(td);
 
@@ -756,7 +788,7 @@ begin
  ksiginfo_init(@ksi);
  ksi.ksi_info.si_signo:=sig;
  ksi.ksi_info.si_code :=SI_LWP;
- ksi.ksi_info.si_pid  :=g_pid;
+ ksi.ksi_info.si_pid  :=p_proc.p_pid;
 
  if (id=-1) then //all
  begin
@@ -810,7 +842,7 @@ end;
 
 function sys_thr_kill2(pid,id,sig:Integer):Integer;
 begin
- if (pid<>0) and (pid<>g_pid) then
+ if (pid<>0) and (pid<>p_proc.p_pid) then
  begin
   Exit(ESRCH);
  end;
@@ -849,9 +881,6 @@ begin
 
  if (Result=0) and ((td^.td_flags and TDF_THRWAKEUP)=0) then
  begin
-  //PROC_UNLOCK; //
-  //Result:=msleep_td(tv);
-  //PROC_LOCK;   //
   Result:=msleep(td,@p_proc.p_mtx,PCATCH,'lthr',tv);
  end;
 
@@ -945,7 +974,7 @@ begin
 
  if (Integer(id)=-1) then
  begin
-  //TODO SetProcName
+  kern_proc.p_proc.p_comm:=name;
   Exit;
  end;
 
@@ -1006,7 +1035,7 @@ begin
  Result:=0;
  td:=curkthread;
  if (td=nil) then Exit(-1);
- cpu_set_user_tls(td,base);
+ cpu_set_fsbase(td,base);
 end;
 
 function sys_amd64_get_fsbase(base:PPointer):Integer;

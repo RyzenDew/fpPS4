@@ -6,8 +6,11 @@ unit kern_proc;
 interface
 
 uses
+ kern_param,
  kern_mtx,
- sys_event;
+ sysent,
+ sys_event,
+ signalvar;
 
 type
  {
@@ -20,18 +23,19 @@ type
   ar_args  :AnsiChar; // Arguments.
  end;
 
-const
- MAXCOMLEN=19;
-
 var
  p_proc:record
   p_mtx:mtx;
+
+  p_pid:Integer;
 
   p_flag :Integer;
   p_osrel:Integer;
 
   p_sdk_version:Integer;
   p_sce_replay_exec:Integer;
+
+  p_sysent:p_sysentvec;
 
   libkernel_start_addr:Pointer;
   libkernel___end_addr:Pointer;
@@ -46,9 +50,16 @@ var
   prog_name        :array[0..1023] of AnsiChar;
   p_randomized_path:array[0..7] of AnsiChar;
 
+  p_sigqueue       :sigqueue_t; //Sigs not delivered to a td.
+  p_pendingcnt     :Integer;    //how many signals are pending
+
   p_klist:t_knlist;
 
   p_args:p_pargs;
+
+  p_self_fixed  :Integer;
+  p_mode_2mb    :Integer;
+  p_budget_ptype:Integer;
 
   p_dmem_aliasing:Integer;
  end;
@@ -66,7 +77,7 @@ procedure PROC_INIT; //SYSINIT
 implementation
 
 uses
- kern_event,
+ elf_machdep,
  md_time;
 
 //
@@ -119,6 +130,9 @@ begin
 
  knlist_init_mtx(@p_proc.p_klist,@p_proc.p_mtx);
 
+ init_sysvec;
+ p_proc.p_sysent:=@self_orbis_sysvec;
+
  p_proc.p_osrel:=osreldate;
 
  p_proc.p_randomized_path:='system';
@@ -126,5 +140,8 @@ begin
  p_proc.p_ptc:=rdtsc;
 end;
 
+
 end.
+
+
 

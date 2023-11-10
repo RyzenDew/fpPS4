@@ -10,7 +10,9 @@
 *.tga
 *.bat
 *.prx
+*.srx
 *.sprx
+*.sdll
 *.bin
 *.elf
 *.self
@@ -23,5 +25,5 @@ shader_dump/*
 avplayer_dump/*
 savedata/*
 tools/vop_generator/vnode_if.*
-tools/syscalls_gen/sysent.pas
+tools/syscalls_gen/init_sysent.pas
 tools/syscalls_gen/syscalls.pas

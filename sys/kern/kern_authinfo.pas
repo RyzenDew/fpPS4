@@ -53,7 +53,16 @@ const
 type
  TCUSANAME=array[0..9] of AnsiChar;
 
- //[preload_lib] -> sceSysmodulePreloadModuleForLibkernel
+const
+ //SceLncAppType
+ SCE_LNC_APP_TYPE_INVALID =-1;
+ SCE_LNC_APP_TYPE_SHELL_UI= 1;
+ SCE_LNC_APP_TYPE_DAEMON  = 2;
+ SCE_LNC_APP_TYPE_CDLG    = 3;
+ SCE_LNC_APP_TYPE_MINI_APP= 4;
+ SCE_LNC_APP_TYPE_BIG_APP = 5;
+
+ //[preloadPrxFlags] -> sceSysmodulePreloadModuleForLibkernel
  //0x0000000004 libSceNet
  //0x0000000008 libSceIpmi
  //0x0000000010 libSceMbus
@@ -89,26 +98,30 @@ type
  //0x2000000000 libSceNpGameIntent
  //0x4000000000 libSceNpWebApi2
 
+type
+ t_title_workaround=packed record
+  version:Integer;
+  align  :Integer;
+  ids    :array[0..1] of QWORD;
+ end;
+
  p_appinfo=^t_appinfo;
  t_appinfo=packed record
-  AppId      :Integer;       //4
-  mmap_flags :Integer;       //4
-  excp_flags :Integer;       //4
-  AppType    :Integer;       //4    5?
-  CUSANAME   :TCUSANAME;     //10
-  debug_level:Byte;          //1
-  slv_flags  :Byte;          //1  eLoadOptions
-  f_1c       :Byte;
-  f_1d       :Byte;
-  f_1e       :Byte;
-  f_1f       :Byte;
-  preload_lib:QWORD;
-  f_28       :Integer;
-  f_2c       :Integer;
-  f_30       :Integer;
-  f_34       :Integer;
-  f_38       :QWORD;
-  f_40       :QWORD;
+  AppId           :Integer;       //4
+  mmap_flags      :Integer;       //4
+  attributeExe    :Integer;       //4
+  AppType         :Integer;       //4  SceLncAppType
+  CUSANAME        :TCUSANAME;     //10 titleId
+  debug_level     :Byte;          //1
+  slv_flags       :Byte;          //1  eLoadOptions
+  budget_flags    :Byte;
+  debug_out       :Byte;
+  f_1e            :Byte;
+  requiredHdcpType:Byte;
+  preloadPrxFlags :QWORD;
+  attribute       :Integer;
+  hasParamSfo     :Integer;
+  titleWorkaround :t_title_workaround;
  end;
  {$IF sizeof(t_appinfo)<>72}{$STOP sizeof(t_appinfo)<>72}{$ENDIF}
 
@@ -129,8 +142,8 @@ implementation
 uses
  errno,
  systm,
- md_proc,
- kern_rtld;
+ kern_proc,
+ md_proc;
 
 function sceSblACMgrHasUseHp3dPipeCapability(info:p_authinfo):Boolean;
 var
@@ -182,7 +195,7 @@ begin
 
  if (info.size<>SizeOf(t_proc_type_info)) then Exit(EINVAL);
 
- info.bptype:=budget_ptype_caller;
+ info.bptype:=p_proc.p_budget_ptype;
 
  if sceSblACMgrIsVideoplayerProcess(@g_authinfo) then
  begin
@@ -219,7 +232,7 @@ begin
  Result:=0;
 
  if (pid<>0) and
-    (pid<>g_pid) then
+    (pid<>p_proc.p_pid) then
  begin
   Exit(ESRCH);
  end;

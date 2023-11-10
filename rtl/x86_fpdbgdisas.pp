@@ -209,6 +209,8 @@ type
 
     OPor, OPout, OPouts,
 
+    OPextrq,
+
     OPpabs, OPpackssdw, OPpacksswb, OPpackusdw, OPpackuswb, OPpadd, OPpadds,
     OPpaddus, OPpalignr, OPpand, OPpandn, OPpause, OPpavg, OPpavgusb, OPpblendvb,
     OPpblend, OPpclmulqdq, OPpcmpeq, OPpcmpestri, OPpcmpestrm, OPpcmpgt, OPpcmpistri,
@@ -346,10 +348,11 @@ type
   public
     ProcessMode: TFPDMode;
     Code: PByte;
-    CodeIdx: Byte;
     OperIdx: Integer;
+    CodeIdx: Byte;
     ModRMIdx: Byte;
     mm: Byte;
+    opcode: DWORD;
     Flags: TFlags;
     SimdOpcode: TSimdOpcode;
     ModRM: record
@@ -523,6 +526,7 @@ type
 
     function AddressSize: TAddressSize;
     function HasOpcode: Boolean;
+    procedure AddOpPrefix;
     procedure SetOpcode(AOpcode: TOpcode; ASuffix: TOpCodeSuffix = OPSnone; APrefixV: Boolean = False);
     procedure Default64;
     procedure Force64;
@@ -707,6 +711,8 @@ const
       'neg', 'nop', 'not',
 
       'or', 'out', 'outs',
+
+      'extrq',
 
       'pabs', 'packssdw', 'packsswb', 'packusdw', 'packuswb', 'padd', 'padds',
       'paddus', 'palignr', 'pand', 'pandn', 'pause', 'pavg', 'pavgusb', 'pblendvb',
@@ -914,8 +920,15 @@ begin
   Flags := Flags - [pre66, preF2, preF3];
 end;
 
+procedure TX86Disassembler.AddOpPrefix;
+begin
+ opcode:=((opcode and (not $FF)) shl 8) or (DWORD(Code[CodeIdx]) shl 8) or (opcode and $FF);
+end;
+
 procedure TX86Disassembler.SetOpcode(AOpcode: TOpcode; ASuffix: TOpCodeSuffix; APrefixV: Boolean);
 begin
+  opcode:=(opcode and (not $FF)) or Code[CodeIdx];
+
   if (flagVex in Flags) and APrefixV
   then Instruction^.OpCode.Prefix := OPPv
   else Instruction^.OpCode.Prefix := OPPnone;
@@ -1558,9 +1571,12 @@ end;
 
 procedure TX86Disassembler.AddIz;
 begin
-  if OperandSize = os16
-  then AddOperand(RegValue(regNone), os16, 2, [hvfIncludeHexchar])
-  else AddOperand(RegValue(regNone), os32, 4, [hvfIncludeHexchar]);
+ case OperandSize of
+   os16:AddOperand(RegValue(regNone), os16, 2, [hvfIncludeHexchar]);
+   os64:AddOperand(RegValue(regNone), os32, 4, [hvfSigned, hvfIncludeHexchar]);
+   else
+        AddOperand(RegValue(regNone), os32, 4, [hvfIncludeHexchar]);
+ end;
 end;
 
 procedure TX86Disassembler.AddJb;
@@ -2272,7 +2288,7 @@ begin
   AddPq;
   AddQq;
   // to adjust the instruction length, add an empty AnInstruction.operand for the Instruction^.Opcode
-  AddOperand({'',} RegValue(regNone), 1);
+  AddOperand(RegValue(regNone), 1);
   // calc index of imm_opcode
   idx := 0;
   if flagModRM in Flags then Inc(idx);
@@ -2736,7 +2752,7 @@ end;
 
 procedure TX86Disassembler.DoGroup14;
 const
-  OPC: array[0..7] of TOpCode       = (OPX_Invalid, OPX_Invalid, OPpsrl, OPpsrl,  OPX_Invalid, OPX_Invalid, OPpsll, OPpsrl);
+  OPC: array[0..7] of TOpCode       = (OPX_Invalid, OPX_Invalid, OPpsrl, OPpsrl,  OPX_Invalid, OPX_Invalid, OPpsll, OPpsll);
   OPS: array[0..7] of TOpCodeSuffix = (OPSnone,     OPSnone,     OPSx_q, OPSx_dq, OPSnone,     OPSnone,     OPSx_q, OPSx_dq);
 begin
   Assert(Code[CodeIdx] = $73, 'Not group 14');
@@ -2961,6 +2977,7 @@ begin
       SetOpcode(OPfemms);
     end;
     $0F: begin
+      AddOpPrefix;
       // AMD
       Do3DNow;
     end;
@@ -2970,8 +2987,18 @@ begin
       case SimdOpcode of
         soNone: begin SetOpcode(OPmovu, OPSx_ps, True); AddVps; AddWps;         end;
         so66:   begin SetOpcode(OPmovu, OPSx_pd, True); AddVpd; AddWpd;         end;
-        soF2:   begin SetOpcode(OPmov,  OPSx_sd, True); AddVx;  AddHx;  AddWsd; end;
-        soF3:   begin SetOpcode(OPmov,  OPSx_ss, True); AddVx;  AddHx;  AddWss; end;
+        soF2:   begin
+                 DecodeModRM;
+                 if ModRM.Mode = 3
+                 then begin SetOpcode(OPmov,  OPSx_sd, True); AddVx;  AddHx;  AddWsd; end
+                 else begin SetOpcode(OPmov,  OPSx_sd, True); AddVx;          AddWsd; end;
+                end;
+        soF3:   begin
+                 DecodeModRM;
+                 if ModRM.Mode = 3
+                 then begin SetOpcode(OPmov,  OPSx_ss, True); AddVx;  AddHx;  AddWss; end
+                 else begin SetOpcode(OPmov,  OPSx_ss, True); AddVx;          AddWss; end;
+                end;
       end;
     end;
     $11: begin
@@ -2979,8 +3006,18 @@ begin
       case SimdOpcode of
         soNone: begin SetOpcode(OPmovu, OPSx_ps, True); AddWps; AddVps;         end;
         so66:   begin SetOpcode(OPmovu, OPSx_pd, True); AddWpd; AddVpd;         end;
-        soF2:   begin SetOpcode(OPmov,  OPSx_sd, True); AddWsd; AddHx;  AddVsd; end;
-        soF3:   begin SetOpcode(OPmov,  OPSx_ss, True); AddWss; AddHx;  AddVss; end;
+        soF2:   begin
+                 DecodeModRM;
+                 if ModRM.Mode = 3
+                 then begin SetOpcode(OPmov,  OPSx_sd, True); AddWsd; AddHx; AddVsd; end
+                 else begin SetOpcode(OPmov,  OPSx_sd, True); AddWsd;        AddVsd; end;
+                end;
+        soF3:   begin
+                 DecodeModRM;
+                 if ModRM.Mode = 3
+                 then begin SetOpcode(OPmov,  OPSx_ss, True); AddWss; AddHx; AddVss; end
+                 else begin SetOpcode(OPmov,  OPSx_ss, True); AddWss;        AddVss; end;
+                end;
       end;
     end;
     $12: begin
@@ -3120,10 +3157,12 @@ begin
       end;
     end;
     $2B: begin
-      DecodeSIMD([soNone, so66]);
+      DecodeSIMD([soNone, so66, soF2, soF3]);
       case SimdOpcode of
         soNone: begin SetOpcode(OPmovnt, OPSx_ps, True); AddMps; AddVps; end;
         so66:   begin SetOpcode(OPmovnt, OPSx_pd, True); AddMpd; AddVpd; end;
+        soF2:   begin SetOpcode(OPmovnt, OPSx_sd, True); AddMpd; AddVpd; end;
+        soF3:   begin SetOpcode(OPmovnt, OPSx_ss, True); AddMpd; AddVpd; end;
       end;
     end;
     $2C: begin
@@ -3182,12 +3221,14 @@ begin
       SetOpcode(OPgetsec);
     end;
     $38: begin
+      AddOpPrefix;
       Inc(CodeIdx);
       Inc(ModRMIdx);
       Do3ByteOpcode38;
     end;
     // $39: OPX_Invalid
     $3A: begin
+      AddOpPrefix;
       Inc(CodeIdx);
       Inc(ModRMIdx);
       Do3ByteOpcode3A;
@@ -3341,6 +3382,7 @@ begin
       then begin
         if flagVex in Flags
         then begin
+          Exclude(Flags,flagModRM);
           if Vex.VectorLength = os128
           then SetOpcode(OPvzeroupper)
           else SetOpcode(OPvzeroall);
@@ -3349,14 +3391,24 @@ begin
       end;
     end;
     $78: begin
-      DecodeSIMD([soNone]);
-      if SimdOpcode = soNone
-      then begin SetOpcode(OPvmread); AddEy; AddGy; end;
+      DecodeSIMD([soNone, so66, soF2]);
+      case SimdOpcode of
+        soNone: begin SetOpcode(OPvmread); AddEy; AddGy; end;
+        so66:   begin
+                 DecodeModRM;
+                 if ModRM.Index = 0
+                 then begin SetOpcode(OPextrq); AddUdq; AddIb; AddIb; end;
+                end;
+        soF2:   begin SetOpcode(OPinsert, OPSx_q); AddVq; AddUdq; AddIb; AddIb; end;
+      end;
     end;
     $79: begin
-      DecodeSIMD([soNone]);
-      if SimdOpcode = soNone
-      then begin SetOpcode(OPvmwrite); AddGy; AddEy; end;
+      DecodeSIMD([soNone, so66, soF2]);
+      case SimdOpcode of
+        soNone: begin SetOpcode(OPvmwrite);        AddGy; AddEy;  end;
+        so66:   begin SetOpcode(OPextrq);          AddVq; AddUdq; end;
+        soF2:   begin SetOpcode(OPinsert, OPSx_q); AddVq; AddUdq; end;
+      end;
     end;
     // $7A..$7B: OPX_Invalid
     $7C: begin
@@ -3376,9 +3428,9 @@ begin
     $7E: begin
       DecodeSIMD([soNone, so66, soF3]);
       case SimdOpcode of
-        soNone: begin SetOpcode(OPmov, OPSx_d      ); AddEy; AddPy; end;
-        so66:   begin SetOpcode(OPmov, OPSx_d, True); AddEy; AddVy; end;
-        soF3:   begin SetOpcode(OPmov, OPSx_q, True); AddVq; AddWq; end;
+        soNone: begin SetOpcode(OPmov, OPS_d_q      ); AddEy; AddPy; end;
+        so66:   begin SetOpcode(OPmov, OPS_d_q, True); AddEy; AddVy; end;
+        soF3:   begin SetOpcode(OPmov, OPSx_q , True); AddVq; AddWq; end;
       end;
     end;
     $7F: begin
@@ -3906,7 +3958,7 @@ begin
         $38: begin SetOpcode(OPinsert,      OPSx_i128,True); AddVqq;   AddHqq; AddWqq;    AddIb; CheckVex; end;
         $39: begin SetOpcode(OPextract,     OPSx_i128,True); AddWdq;   AddVqq; AddIb;            CheckVex; end;
         $40: begin SetOpcode(OPdp,          OPSx_ps,  True); AddVx;    AddHx;  AddWx;     AddIb;           end;
-        $41: begin SetOpcode(OPdp,          OPSx_pd,  True); AddVdq;   AddHdq; AddWdq;    AddIb;           end;
+        $41: begin SetOpcode(OPdp,          OPSx_pd,  True); AddVdq;   AddHx;  AddWdq;    AddIb;           end;
         $42: begin SetOpcode(OPmpsadbw,     OPSnone,  True); AddVx;    AddHx;  AddWx;     AddIb;           end;
         $44: begin SetOpcode(OPpclmulqdq,   OPSnone,  True); AddVdq;   AddHdq; AddWdq;    AddIb;           end;
         $46: begin SetOpcode(OPvperm2,      OPSx_i128     ); AddVqq;   AddHqq; AddWqq;    AddIb; CheckVex; end;
@@ -4038,6 +4090,7 @@ begin
         AddReg(regSegment, MODE_SIZE[ProcessMode], REG_CS);
       end;
       $0F: begin
+        AddOpPrefix;
         Inc(CodeIdx);
         Inc(ModRMIdx);
         Do2ByteOpcode;
@@ -4275,7 +4328,11 @@ begin
       //---
       $90: begin
         if preF3 in Flags
-        then SetOpcode(OPpause)
+        then
+        begin
+         SetOpcode(OPpause);
+         Exclude(Flags, preF3);
+        end
         else if rexB in Flags
         then begin
           SetOpcode(OPxchg);
@@ -4391,7 +4448,7 @@ begin
       $A9: begin
         SetOpcode(OPtest);
         AddReg(regGeneral, OperandSize, REG_A);
-        AddIv;
+        AddIz;
       end;
       $AA: begin
         SetOpcode(OPstos, OPSx_b); CheckRepeat;
@@ -4452,6 +4509,7 @@ begin
       $C3: begin
         Force64;
         SetOpcode(OPret);
+        CheckRepeat;
       end;
       $C4: begin
         DecodeModRM;
@@ -4694,6 +4752,7 @@ begin
 
   SetOpcode(OPX_Invalid);
 
+  opcode := 0;
   Flags := [];
   CodeIdx := 0;
   OperIdx := 0;

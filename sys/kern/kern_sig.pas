@@ -7,6 +7,7 @@ interface
 
 uses
  mqueue,
+ kern_param,
  sys_event,
  time,
  signal,
@@ -125,12 +126,11 @@ uses
  kern_exit,
  kern_prot,
  kern_synch,
- kern_event,
  md_context,
  md_proc,
  machdep,
  sched_ule,
- subr_sleepqueue;
+ sys_sleepqueue;
 
 const
  max_pending_per_proc=128;
@@ -138,9 +138,6 @@ const
  kern_forcesigexit=1;
 
 var
- g_p_sigqueue     :sigqueue_t; //Sigs not delivered to a td.
- g_p_pendingcnt   :Integer=0;  //how many signals are pending
-
  signal_overflow  :Integer=0;
  signal_alloc_fail:Integer=0;
 
@@ -202,7 +199,7 @@ begin
     ksiginfo_copy(ksi,si);
     if ksiginfo_tryfree(ksi) then
     begin
-     Dec(g_p_pendingcnt);
+     Dec(p_proc.p_pendingcnt);
     end;
    end;
    if (count>1) then
@@ -239,7 +236,7 @@ begin
  ksi^.ksi_sigq:=nil;
  if ((ksi^.ksi_flags and KSI_EXT)=0)then
  begin
-  Dec(g_p_pendingcnt);
+  Dec(p_proc.p_pendingcnt);
  end;
 
  kp:=TAILQ_FIRST(@sq^.sq_list);
@@ -281,7 +278,7 @@ begin
   goto out_set_bit;
  end;
 
- if (g_p_pendingcnt>=max_pending_per_proc) then
+ if (p_proc.p_pendingcnt>=max_pending_per_proc) then
  begin
   Inc(signal_overflow);
   Result:=EAGAIN;
@@ -294,7 +291,7 @@ begin
    Result:=EAGAIN;
   end else
   begin
-   Inc(g_p_pendingcnt);
+   Inc(p_proc.p_pendingcnt);
    ksiginfo_copy(si,ksi);
    ksi^.ksi_info.si_signo:=signo;
    if ((si^.ksi_flags and KSI_HEAD)<>0) then
@@ -336,7 +333,7 @@ begin
   ksi^.ksi_sigq:=nil;
   if ksiginfo_tryfree(ksi) then
   begin
-   Dec(g_p_pendingcnt);
+   Dec(p_proc.p_pendingcnt);
   end;
   ksi:=next;
  end;
@@ -396,7 +393,7 @@ begin
    ksi^.ksi_sigq:=nil;
    if ksiginfo_tryfree(ksi) then
    begin
-    Dec(g_p_pendingcnt)
+    Dec(p_proc.p_pendingcnt)
    end;
   end;
 
@@ -423,7 +420,7 @@ var
  i:kthread_iterator;
 begin
  sigqueue_init(@worklist);
- sigqueue_move_set(@g_p_sigqueue,@worklist,_set);
+ sigqueue_move_set(@p_proc.p_sigqueue,@worklist,_set);
 
  if FOREACH_THREAD_START(@i) then
  begin
@@ -464,7 +461,7 @@ end;
 
 Function issignal(td:p_kthread;stop_allowed:Integer):Integer; forward;
 
-Function cursig(td:p_kthread;stop_allowed:Integer):Integer;
+Function cursig(td:p_kthread;stop_allowed:Integer):Integer; public;
 begin
  Assert((stop_allowed=SIG_STOP_ALLOWED) or (stop_allowed=SIG_STOP_NOT_ALLOWED),'cursig: stop_allowed');
 
@@ -487,7 +484,7 @@ begin
  end;
 end;
 
-Function sigonstack(sp:size_t):Integer;
+Function sigonstack(sp:size_t):Integer; public;
 var
  td:p_kthread;
 begin
@@ -511,12 +508,12 @@ begin
  end;
 end;
 
-procedure ps_mtx_lock;
+procedure ps_mtx_lock; public;
 begin
  mtx_lock(p_sigacts.ps_mtx);
 end;
 
-procedure ps_mtx_unlock;
+procedure ps_mtx_unlock; public;
 begin
  mtx_unlock(p_sigacts.ps_mtx);
 end;
@@ -672,7 +669,7 @@ begin
   end;
  end;
 
- sigqueue_init(@g_p_sigqueue);
+ sigqueue_init(@p_proc.p_sigqueue);
 end;
 
 procedure reschedule_signals(block:sigset_t;flags:Integer); forward;
@@ -682,7 +679,7 @@ Function kern_sigprocmask(td:p_kthread;
                           _set:p_sigset_t;
                           oset:p_sigset_t;
                           flags:Integer
-                         ):Integer;
+                         ):Integer; public;
 label
  _out;
 var
@@ -787,7 +784,7 @@ begin
  if (td=nil) then Exit(-1);
 
  PROC_LOCK;
- pending:=g_p_sigqueue.sq_signals;
+ pending:=p_proc.p_sigqueue.sq_signals;
  SIGSETOR(@pending,@td^.td_sigqueue.sq_signals);
  PROC_UNLOCK;
 
@@ -836,7 +833,7 @@ begin
   if (sig<>0) and SIGISMEMBER(@waitset,sig) then
   begin
    if (sigqueue_get(@td^.td_sigqueue,sig,ksi)<>0) or
-      (sigqueue_get(@g_p_sigqueue,sig,ksi)<>0) then
+      (sigqueue_get(@p_proc.p_sigqueue,sig,ksi)<>0) then
    begin
     Result:=0;
     break;
@@ -864,10 +861,7 @@ begin
    tv:=0;
   end;
 
-  //PROC_UNLOCK; //
   Result:=msleep(@p_sigacts,@p_proc.p_mtx,PPAUSE or PCATCH,'sigwait',tvtohz(tv));
-  //Result:=msleep_td(tvtohz(tv));
-  //PROC_LOCK;  //
 
   if (timeout<>nil) then
   begin
@@ -1188,7 +1182,9 @@ var
  error:Integer;
 begin
  if (signum > _SIG_MAXSIG) then
+ begin
   Exit(EINVAL);
+ end;
 
  ksiginfo_init(@ksi);
  ksi.ksi_info.si_signo:=signum;
@@ -1198,14 +1194,16 @@ begin
  if (pid > 0) then
  begin
   { kill single process }
-  if (pid<>g_pid) then Exit(ESRCH);
+  if (pid<>p_proc.p_pid) then Exit(ESRCH);
 
   PROC_LOCK;
 
   error:=p_cansignal(signum);
 
   if (error=0) and (signum<>0) then
+  begin
    pksignal(signum, @ksi);
+  end;
 
   PROC_UNLOCK;
 
@@ -1229,7 +1227,9 @@ var
  error:Integer;
 begin
  if (signum > _SIG_MAXSIG) then
+ begin
   Exit(EINVAL);
+ end;
 
  {
   * Specification says sigqueue can only send signal to
@@ -1240,7 +1240,7 @@ begin
   Exit(EINVAL);
  end;
 
- if (pid<>0) and (pid<>g_pid) then
+ if (pid<>0) and (pid<>p_proc.p_pid) then
  begin
   Exit(ESRCH);
  end;
@@ -1253,7 +1253,7 @@ begin
   ksi.ksi_flags:=KSI_SIGQ;
   ksi.ksi_info.si_signo:=signum;
   ksi.ksi_info.si_code :=SI_QUEUE;
-  ksi.ksi_info.si_pid  :=g_pid;
+  ksi.ksi_info.si_pid  :=p_proc.p_pid;
   ksi.ksi_info.si_value.sival_ptr:=value;
 
   PROC_LOCK();
@@ -1390,7 +1390,7 @@ begin
  ksiginfo_init(@ksi);
  ksi.ksi_info.si_signo:=sig;
  ksi.ksi_info.si_code :=SI_KERNEL;
- ksi.ksi_info.si_pid  :=g_pid;
+ ksi.ksi_info.si_pid  :=p_proc.p_pid;
  tdsendsignal(nil,sig,@ksi);
 end;
 
@@ -1410,13 +1410,13 @@ var
 begin
  Result:=0;
 
- KNOTE_LOCKED(@g_p_klist, NOTE_SIGNAL or sig);
+ KNOTE_LOCKED(@p_proc.p_klist, NOTE_SIGNAL or sig);
  prop:=sigprop(sig);
 
  if (td=nil) then
  begin
   td:=sigtd(sig,prop);
-  sigqueue:=@g_p_sigqueue;
+  sigqueue:=@p_proc.p_sigqueue;
  end else
  begin
   sigqueue:=@td^.td_sigqueue;
@@ -1469,14 +1469,14 @@ begin
  tdsigwakeup(td,sig,action,intrval);
 end;
 
-procedure tdsignal(td:p_kthread;sig:Integer);
+procedure tdsignal(td:p_kthread;sig:Integer); public;
 var
  ksi:ksiginfo_t;
 begin
  ksiginfo_init(@ksi);
  ksi.ksi_info.si_signo:=sig;
  ksi.ksi_info.si_code :=SI_KERNEL;
- ksi.ksi_info.si_pid  :=g_pid;
+ ksi.ksi_info.si_pid  :=p_proc.p_pid;
  tdsendsignal(td,sig,@ksi);
 end;
 
@@ -1519,7 +1519,7 @@ begin
   begin
    thread_unlock(td);
    PROC_UNLOCK;
-   sigqueue_delete(@g_p_sigqueue,sig);
+   sigqueue_delete(@p_proc.p_sigqueue,sig);
    sigqueue_delete(@td^.td_sigqueue,sig);
    Exit;
   end;
@@ -1553,9 +1553,9 @@ var
  td:p_kthread;
  sig:Integer;
 begin
- if (SIGISEMPTY(@g_p_sigqueue.sq_signals)) then Exit;
+ if (SIGISEMPTY(@p_proc.p_sigqueue.sq_signals)) then Exit;
 
- SIGSETAND(@block,@g_p_sigqueue.sq_signals);
+ SIGSETAND(@block,@p_proc.p_sigqueue.sq_signals);
 
  repeat
   sig:=sig_ffs(@block);
@@ -1600,7 +1600,7 @@ begin
  reschedule_signals(unblocked,0);
 end;
 
-function sigdeferstop:Integer;
+function sigdeferstop:Integer; public;
 var
  td:p_kthread;
 begin
@@ -1612,7 +1612,7 @@ begin
  Result:=1;
 end;
 
-procedure sigallowstop;
+procedure sigallowstop; public;
 var
  td:p_kthread;
 begin
@@ -1630,7 +1630,7 @@ begin
  repeat
 
   sigpending:=td^.td_sigqueue.sq_signals;
-  SIGSETOR(@sigpending,@g_p_sigqueue.sq_signals);
+  SIGSETOR(@sigpending,@p_proc.p_sigqueue.sq_signals);
   SIGSETNAND(@sigpending,@td^.td_sigmask);
 
   if (td^.td_flags and TDF_SBDRY)<>0 then
@@ -1646,7 +1646,7 @@ begin
   if SIGISMEMBER(@p_sigacts.ps_sigignore,sig) then
   begin
    sigqueue_delete(@td^.td_sigqueue,sig);
-   sigqueue_delete(@g_p_sigqueue,sig);
+   sigqueue_delete(@p_proc.p_sigqueue,sig);
    continue;
   end;
 
@@ -1682,7 +1682,7 @@ begin
   end;
 
   sigqueue_delete(@td^.td_sigqueue,sig);
-  sigqueue_delete(@g_p_sigqueue,sig);
+  sigqueue_delete(@p_proc.p_sigqueue,sig);
  until false;
 end;
 
@@ -1700,7 +1700,7 @@ begin
  ksiginfo_init(@ksi);
 
  if (sigqueue_get(@td^.td_sigqueue,sig,@ksi)=0) and
-    (sigqueue_get(@g_p_sigqueue,sig,@ksi)=0) then
+    (sigqueue_get(@p_proc.p_sigqueue,sig,@ksi)=0) then
  begin
   Exit(0);
  end;
@@ -1736,7 +1736,7 @@ begin
  Result:=1;
 end;
 
-procedure sigexit(td:p_kthread;sig:Integer);
+procedure sigexit(td:p_kthread;sig:Integer); public;
 begin
  exit1(W_EXITCODE(0,sig));
  // NOTREACHED
@@ -1744,7 +1744,7 @@ end;
 
 //
 
-procedure ast;
+procedure ast; public;
 var
  td:p_kthread;
  flags,sig:Integer;
@@ -1756,11 +1756,14 @@ begin
  if (td=nil) then Exit;
 
  //teb stack
- sttop:=td^.td_teb^.sttop;
- stack:=td^.td_teb^.stack;
- //
- td^.td_teb^.sttop:=td^.td_kstack.sttop;
- td^.td_teb^.stack:=td^.td_kstack.stack;
+ if ((td^.pcb_flags and PCB_IS_JIT)=0) then
+ begin
+  sttop:=td^.td_teb^.sttop;
+  stack:=td^.td_teb^.stack;
+  //
+  td^.td_teb^.sttop:=td^.td_kstack.sttop;
+  td^.td_teb^.stack:=td^.td_kstack.stack;
+ end;
  //teb stack
 
  thread_lock(td);
@@ -1805,8 +1808,8 @@ begin
  end;
 
  if ((flags and TDF_NEEDSIGCHK)<>0) or
-    (g_p_pendingcnt>0) or
-    (not SIGISEMPTY(@g_p_sigqueue.sq_list)) then
+    (p_proc.p_pendingcnt>0) or
+    (not SIGISEMPTY(@p_proc.p_sigqueue.sq_list)) then
  begin
   PROC_LOCK;
   ps_mtx_lock;
@@ -1862,8 +1865,11 @@ begin
  end;
 
  //teb stack
- td^.td_teb^.sttop:=sttop;
- td^.td_teb^.stack:=stack;
+ if ((td^.pcb_flags and PCB_IS_JIT)=0) then
+ begin
+  td^.td_teb^.sttop:=sttop;
+  td^.td_teb^.stack:=stack;
+ end;
  //teb stack
 end;
 
@@ -1874,14 +1880,14 @@ begin
  kn^.kn_ptr.p_proc:=nil;
  kn^.kn_flags:=kn^.kn_flags or EV_CLEAR;  // automatically set
 
- knlist_add(@g_p_klist, kn, 0);
+ knlist_add(@p_proc.p_klist, kn, 0);
 
  Exit(0);
 end;
 
 procedure filt_sigdetach(kn:p_knote);
 begin
- knlist_remove(@g_p_klist, kn, 0);
+ knlist_remove(@p_proc.p_klist, kn, 0);
 end;
 
 function filt_signal(kn:p_knote;hint:QWORD):Integer;
@@ -1891,7 +1897,9 @@ begin
   hint:=hint and (not NOTE_SIGNAL);
 
   if (kn^.kn_id=hint) then
+  begin
    Inc(kn^.kn_kevent.data);
+  end;
  end;
 
  Exit(ord(kn^.kn_data<>0));

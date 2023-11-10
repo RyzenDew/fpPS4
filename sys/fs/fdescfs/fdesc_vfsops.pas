@@ -7,6 +7,7 @@ interface
 
 uses
  vmount,
+ kern_param,
  vfs_mount,
  vnode,
  fdescfs;
@@ -77,7 +78,7 @@ end;
  }
 function fdesc_cmount(ma,data:Pointer;flags:QWORD):Integer;
 begin
- Exit(kernel_mount(ma, flags));
+ Exit(kernel_nmount(ma, flags));
 end;
 
 {

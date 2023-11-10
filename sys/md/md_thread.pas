@@ -32,10 +32,16 @@ function  cpu_thread_finished(td:p_kthread):Boolean;
 function  cpuset_setaffinity(td:p_kthread;new:Ptruint):Integer;
 function  cpu_set_priority(td:p_kthread;prio:Integer):Integer;
 
+procedure seh_wrapper(td:p_kthread);
+
 implementation
 
-uses
- kern_umtx;
+//
+
+var
+ size_of_umtx_q:Integer; external;
+
+//
 
 function cpu_thread_alloc():p_kthread;
 var
@@ -60,7 +66,7 @@ begin
  if (R<>0) then Exit;
 
  //header
- size:=SizeOf(kthread)+SizeOf(umtx_q);
+ size:=SizeOf(kthread)+size_of_umtx_q;
  size:=System.Align(size,4*1024);
 
  R:=NtAllocateVirtualMemory(
@@ -313,6 +319,24 @@ begin
  Result:=NtSetInformationThread(td^.td_handle,ThreadBasePriority,@prio,SizeOf(Integer));
 end;
 
+procedure main_wrapper; assembler; nostackframe;
+asm
+ subq   $40, %rsp
+.seh_stackalloc 40
+.seh_endprologue
+
+ call %gs:teb.jitcall
+
+ nop
+ addq   $40, %rsp
+.seh_handler __FPC_default_handler,@except,@unwind
+end;
+
+procedure seh_wrapper(td:p_kthread);
+begin
+ td^.td_teb^.jitcall:=Pointer(td^.td_frame.tf_rip);
+ td^.td_frame.tf_rip:=QWORD(@main_wrapper);
+end;
 
 
 end.

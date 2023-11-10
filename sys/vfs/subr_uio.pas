@@ -8,6 +8,7 @@ interface
 uses
  vuio,
  systm,
+ kern_param,
  kern_thr;
 
 function uiomove(cp:Pointer;n:Integer;uio:p_uio):Integer;
@@ -93,7 +94,6 @@ begin
       Move(iov^.iov_base^, cp^, cnt);
     end;
    UIO_NOCOPY:;
-   else;
   end;
 
   Inc(iov^.iov_base  ,cnt);

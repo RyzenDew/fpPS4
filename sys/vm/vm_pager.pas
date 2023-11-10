@@ -7,7 +7,7 @@ interface
 
 uses
  vm,
- vm_object;
+ sys_vm_object;
 
 function  vm_pager_allocate(otype:objtype_t;
                            handle:Pointer;
@@ -58,7 +58,7 @@ begin
  obj^.otype:=OBJT_DEAD;
 end;
 
-procedure vm_pager_deallocate(obj:vm_object_t);
+procedure vm_pager_deallocate(obj:vm_object_t); public;
 begin
  if (obj=nil) then Exit;
 
@@ -75,7 +75,6 @@ begin
   OBJT_TRCMEM   :;
   OBJT_PHYSHM   :;
   OBJT_BLOCKPOOL:;
-  else;
  end;
 end;
 

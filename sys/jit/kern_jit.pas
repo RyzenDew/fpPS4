@@ -1,4 +1,4 @@
-unit kern_jit2;
+unit kern_jit;
 
 {$mode ObjFPC}{$H+}
 {$CALLING SysV_ABI_CDecl}
@@ -9,8 +9,7 @@ uses
  mqueue,
  x86_fpdbgdisas,
  x86_jit,
- kern_jit2_ctx,
- kern_jit2_ops_avx;
+ kern_jit_ctx;
 
 var
  print_asm:Boolean=False;
@@ -22,270 +21,28 @@ implementation
 
 uses
  sysutils,
- kern_thr,
- ucontext,
- vmparam,
  vm_pmap,
  vm_map,
- systm,
- trap,
- md_context,
- kern_sig,
- kern_jit2_ops,
- kern_jit_dynamic;
-
-procedure jit_syscall; assembler; nostackframe;
-label
- _after_call,
- _doreti,
- _fail,
- _ast,
- _doreti_exit;
-asm
- //prolog (debugger)
- pushq %rbp
- movqq %rsp,%rbp
-
- movqq %rax,jit_frame.tf_rip(%r15) //save %rax to tf_rip
-
- pushf
- pop %rax
-
- movqq %gs:teb.thread,%r14 //curkthread
- test  %r14,%r14
- jz    _fail
-
- andl  NOT_PCB_FULL_IRET,kthread.pcb_flags(%r14) //clear PCB_FULL_IRET
-
- movqq %rax,kthread.td_frame.tf_rflags(%r14) //save flags
-
- movqq %rdi,kthread.td_frame.tf_rdi(%r14)
- movqq %rsi,kthread.td_frame.tf_rsi(%r14)
- movqq %rdx,kthread.td_frame.tf_rdx(%r14)
- movqq   $0,kthread.td_frame.tf_rcx(%r14)
- movqq %r8 ,kthread.td_frame.tf_r8 (%r14)
- movqq %r9 ,kthread.td_frame.tf_r9 (%r14)
- movqq %rbx,kthread.td_frame.tf_rbx(%r14)
- movqq %r10,kthread.td_frame.tf_r10(%r14)
- movqq   $0,kthread.td_frame.tf_r11(%r14)
- movqq %r12,kthread.td_frame.tf_r12(%r14)
- movqq %r13,kthread.td_frame.tf_r13(%r14)
-
- movqq   $1,kthread.td_frame.tf_trapno(%r14)
- movqq   $0,kthread.td_frame.tf_addr  (%r14)
- movqq   $0,kthread.td_frame.tf_flags (%r14)
- movqq   $2,kthread.td_frame.tf_err   (%r14) //sizeof(syscall)
-
- movqq jit_frame.tf_rax(%r15),%rax
- movqq %rax,kthread.td_frame.tf_rax(%r14)
-
- movqq jit_frame.tf_rsp(%r15),%rax
- movqq %rax,kthread.td_frame.tf_rsp(%r14)
-
- movqq jit_frame.tf_rbp(%r15),%rax
- movqq %rax,kthread.td_frame.tf_rbp(%r14)
-
- movqq jit_frame.tf_r14(%r15),%rax
- movqq %rax,kthread.td_frame.tf_r14(%r14)
-
- movqq jit_frame.tf_r15(%r15),%rax
- movqq %rax,kthread.td_frame.tf_r15(%r14)
-
- movqq jit_frame.tf_rip(%r15),%rax
- movqq %rax,kthread.td_frame.tf_rip(%r14)
-
- andq  $-16,%rsp //align stack
-
- call amd64_syscall
-
- _after_call:
-
- movqq %gs:teb.thread          ,%r14 //curkthread
- movqq kthread.td_jit_ctx(%r14),%r15 //jit_frame
-
- //Requested full context restore
- testl PCB_FULL_IRET,kthread.pcb_flags(%r14)
- jnz _doreti
-
- testl TDF_AST,kthread.td_flags(%r14)
- jne _ast
-
- //Restore preserved registers.
-
- //get flags
- movqq kthread.td_frame.tf_rflags(%r14),%rax
- push %rax
- popf
-
- movqq kthread.td_frame.tf_rdi(%r14),%rdi
- movqq kthread.td_frame.tf_rsi(%r14),%rsi
- movqq kthread.td_frame.tf_rdx(%r14),%rdx
-
- movqq kthread.td_frame.tf_rax(%r14),%rax
- movqq %rax,jit_frame.tf_rax(%r15)
-
- movqq kthread.td_frame.tf_rsp(%r14),%rax
- movqq %rax,jit_frame.tf_rsp(%r15)
-
- movqq kthread.td_frame.tf_rbp(%r14),%rax
- movqq %rax,jit_frame.tf_rbp(%r15)
-
- movqq $0,%rcx
- movqq $0,%r11
-
- //epilog (debugger)
- popq  %rbp
- ret
-
- //fail (curkthread=nil)
- _fail:
-
- or $1,%rax //set CF
- push %rax
- popf
-
- movqq $14,jit_frame.tf_rax(%r15) //EFAULT
- movqq  $0,%rdx
- movqq  $0,%rcx
- movqq  $0,%r11
-
- popq  %rbp
- ret
-
- //ast
- _ast:
-
-  call ast
-  jmp _after_call
-
- //doreti
- _doreti:
-
-  //%r14=curkthread
-  testl TDF_AST,kthread.td_flags(%r14)
-  je _doreti_exit
-
-  call ast
-  jmp _doreti
-
- _doreti_exit:
-
-  //Restore full.
-  call  ipi_sigreturn
-  hlt
-end;
-
-procedure jit_before_start; assembler; nostackframe;
-asm
- nop
-end;
-
-procedure jit_jmp_dispatch; assembler; nostackframe;
-asm
- //prolog (debugger)
- push %rbp
- movq %rsp,%rbp
-
- andq  $-16,%rsp //align stack
-
- pushf     //0
- push %rdi //1
- push %rsi //2
- push %rdx //3
- push %rcx //4
- push %r8  //5
- push %r9  //6
- push %r10 //7
- push %r11 //8
-
- lea  -8(%rsp),%rsp //align
-
- lea  -16(%rsp),%rsp
- movdqa %xmm0,(%rsp)
-
- mov  %rax,%rdi
- mov    $0,%rsi
-
- call jmp_dispatcher
-
- movdqa (%rsp),%xmm0
- lea  16(%rsp),%rsp
-
- lea  8(%rsp),%rsp //align
-
- pop  %r11 //0
- pop  %r10 //1
- pop  %r9  //2
- pop  %r8  //3
- pop  %rcx //4
- pop  %rdx //5
- pop  %rsi //6
- pop  %rdi //7
- popf      //8
-
- //epilog
- movq %rbp,%rsp
- pop  %rbp
-
- lea  8(%rsp),%rsp
- jmp  %rax
-end;
-
-procedure jit_call_dispatch; assembler; nostackframe;
-asm
- //prolog (debugger)
- push %rbp
- movq %rsp,%rbp
-
- andq  $-16,%rsp //align stack
-
- push %rdi //0
- push %rsi //1
- push %rdx //2
- push %rcx //3
- push %r8  //4
- push %r9  //5
- push %r10 //6
- push %r11 //7
-
- mov  %rax,%rdi
- mov    $1,%rsi
-
- lea  -16(%rsp),%rsp
- movdqa %xmm0,(%rsp)
-
- call jmp_dispatcher
-
- movdqa (%rsp),%xmm0
- lea  16(%rsp),%rsp
-
- pop  %r11 //0
- pop  %r10 //1
- pop  %r9  //2
- pop  %r8  //3
- pop  %rcx //4
- pop  %rdx //5
- pop  %rsi //6
- pop  %rdi //7
-
- //epilog
- movq %rbp,%rsp
- pop  %rbp
-
- lea  8(%rsp),%rsp
- jmp  %rax
-end;
+ kern_jit_ops,
+ kern_jit_ops_sse,
+ kern_jit_ops_avx,
+ kern_jit_dynamic,
+ kern_jit_test,
+ kern_jit_asm;
 
 procedure jit_assert;
 begin
- Writeln('TODO:jit_assert');
- Assert(False);
+ Assert(False,'jit_assert');
 end;
 
 procedure jit_system_error;
 begin
- Writeln('TODO:jit_system_error');
- Assert(False);
+ Assert(False,'jit_system_error');
+end;
+
+procedure jit_unknow_int;
+begin
+ Assert(False,'jit_unknow_int');
 end;
 
 procedure jit_exit_proc;
@@ -303,6 +60,7 @@ end;
 //0x40000000
 //0x40000010
 
+//0x80000000
 //0x80000001
 //0x80000002
 //0x80000004
@@ -315,11 +73,12 @@ end;
 procedure jit_cpuid; assembler; nostackframe;
 label
  _cpuid_0,
- _cpuid_1;
+ _cpuid_1,
+ _cpuid_80000000,
+ _cpuid_80000001,
+ _cpuid_80000008;
 asm
  pushf
-
- mov jit_frame.tf_rax(%r15),%rax
 
  cmp $0,%eax
  je _cpuid_0
@@ -327,7 +86,22 @@ asm
  cmp $1,%eax
  je _cpuid_1
 
+ cmp $0x80000000,%eax
+ je _cpuid_80000000
+
+ cmp $0x80000001,%eax
+ je _cpuid_80000001
+
+
+ cmp $0x80000008,%eax
+ je _cpuid_80000008
+
  ud2
+
+
+
+
+
 
  _cpuid_0:
 
@@ -339,7 +113,6 @@ asm
  mov $0x69746E65,%edx
  mov $0x444D4163,%ecx
 
- mov %rax,jit_frame.tf_rax(%r15)
  popf
  ret
 
@@ -366,7 +139,37 @@ asm
 
  or $0x00000800,%ebx //cpu_procinfo
 
- mov %rax,jit_frame.tf_rax(%r15)
+ popf
+ ret
+
+ _cpuid_80000000:
+
+ //cpu_exthigh TODO check
+ mov $0xC0000001,%eax
+
+ //cpu_vendor
+ mov $0x68747541,%ebx
+ mov $0x69746E65,%edx
+ mov $0x444D4163,%ecx
+
+ popf
+ ret
+
+ _cpuid_80000001:
+
+ mov $0x2e500800,%edx //amd_feature
+ mov $0x154837fb,%ecx //amd_feature2
+
+ popf
+ ret
+
+ _cpuid_80000008:
+
+ mov $0x00003030,%eax //TODO check
+ mov $0x00001007,%ebx //TODO check
+ mov $0x00000000,%edx //TODO check
+ mov $0x00004007,%ecx //cpu_procinfo2 TODO check
+
  popf
  ret
 
@@ -374,33 +177,39 @@ end;
 
 procedure op_jmp_dispatcher(var ctx:t_jit_context2);
 begin
- ctx.builder.call_far(@jit_jmp_dispatch); //input:rax
+ with ctx.builder do
+ begin
+  leap(r15);
+  call_far(@jit_plt_cache); //input:r14,r15
+ end;
 end;
 
 procedure op_call_dispatcher(var ctx:t_jit_context2);
 begin
- ctx.builder.call_far(@jit_call_dispatch); //input:rax
+ with ctx.builder do
+ begin
+  leap(r15);
+  call_far(@jit_plt_cache); //input:r14,r15
+ end;
 end;
 
 procedure op_push_rip(var ctx:t_jit_context2);
 var
- i:Integer;
  stack:TRegValue;
  imm:Int64;
 begin
  //lea rsp,[rsp-8]
- //mov [rsp],rax
+ //mov [rsp],r14
 
  with ctx.builder do
  begin
   stack:=r_tmp0;
 
-  i:=GetFrameOffset(rsp);
-  movq(stack,[r_thrd+i]);
+  op_load_rsp(ctx,stack);
   leaq(stack,[stack-8]);
-  movq([r_thrd+i],stack);
+  op_save_rsp(ctx,stack);
 
-  call_far(@uplift_jit); //in/out:rax uses:r14
+  call_far(@uplift_jit); //in/out:r14
 
   imm:=Int64(ctx.ptr_next);
 
@@ -420,42 +229,38 @@ begin
   end else
   begin
    //32bit sign extend
-   movi(os64,[stack],imm);
+   movi([stack,os64],imm);
   end;
 
  end;
 end;
 
-procedure op_pop_rip(var ctx:t_jit_context2); //out:rax
+procedure op_pop_rip(var ctx:t_jit_context2;imm:Word); //out:r14
 var
- i:Integer;
  stack:TRegValue;
 begin
- //mov rax,[rsp]
- //lea rsp,[rsp+8]
+ //mov r14,[rsp]
+ //lea rsp,[rsp+8+imm]
 
  with ctx.builder do
  begin
   stack:=r_tmp0;
 
-  i:=GetFrameOffset(rsp);
-  movq(stack,[r_thrd+i]);
+  op_load_rsp(ctx,stack);
 
-  call_far(@uplift_jit); //in/out:rax uses:r14
+  call_far(@uplift_jit); //in/out:r14
 
   movq(r_tmp1,[stack]);
 
-  seto(al);
-  lahf;
-   addi8(os64,[r_thrd+i],8);
-  addi(al,127);
-  sahf;
+  op_load_rsp(ctx,stack);
+  leaq(stack,[stack+8+imm]);
+  op_save_rsp(ctx,stack);
 
   movq(r_tmp0,r_tmp1);
  end;
 end;
 
-procedure op_set_rax_imm(var ctx:t_jit_context2;imm:Int64);
+procedure op_set_r14_imm(var ctx:t_jit_context2;imm:Int64);
 begin
  with ctx.builder do
   if (classif_offset_u64(imm)=os64) then
@@ -475,7 +280,6 @@ var
  ofs:Int64;
  dst:Pointer;
  new1,new2:TRegValue;
- i:Integer;
  link:t_jit_i_link;
 begin
  op_push_rip(ctx);
@@ -497,15 +301,15 @@ begin
    if (link<>nil_link) then
    begin
     ctx.builder.jmp(link);
-    ctx.add_forward_point(nil_link,dst);
+    ctx.add_forward_point(fpCall,dst);
    end else
    begin
     id:=ctx.builder.jmp(nil_link);
-    ctx.add_forward_point(id,dst);
+    ctx.add_forward_point(fpCall,id,dst);
    end;
   end else
   begin
-   op_set_rax_imm(ctx,Int64(dst));
+   op_set_r14_imm(ctx,Int64(dst));
    //
    op_call_dispatcher(ctx);
   end;
@@ -517,7 +321,7 @@ begin
   //
   build_lea(ctx,1,new1,[inc8_rsp,code_ref]);
   //
-  ctx.builder.call_far(@uplift_jit); //in/out:rax uses:r14
+  ctx.builder.call_far(@uplift_jit); //in/out:r14
   //
   ctx.builder.movq(new1,[new1]);
   //
@@ -527,8 +331,7 @@ begin
  begin
   new1:=new_reg_size(r_tmp0,ctx.din.Operand[1]);
   //
-  i:=GetFrameOffset(ctx.din.Operand[1].RegValue[0]);
-  ctx.builder.movq(new1,[r_thrd+i]);
+  op_load(ctx,new1,1);
   //
   if is_rsp(ctx.din.Operand[1].RegValue[0]) then
   begin
@@ -547,14 +350,17 @@ begin
  end;
 
  //
- ctx.add_forward_point(nil_link,ctx.ptr_next);
+ ctx.add_forward_point(fpCall,ctx.ptr_next);
 end;
 
 procedure op_ret(var ctx:t_jit_context2);
+var
+ imm:Int64;
 begin
- Assert(ctx.din.Operand[1].ByteCount=0);
-
- op_pop_rip(ctx); //out:rax
+ imm:=0;
+ GetTargetOfs(ctx.din,ctx.code,1,imm);
+ //
+ op_pop_rip(ctx,imm); //out:r14
  //
  op_jmp_dispatcher(ctx);
  //
@@ -567,7 +373,6 @@ var
  ofs:Int64;
  dst:Pointer;
  new1,new2:TRegValue;
- i:Integer;
  link:t_jit_i_link;
 begin
  if (ctx.din.Operand[1].RegValue[0].AType=regNone) then
@@ -585,15 +390,15 @@ begin
    if (link<>nil_link) then
    begin
     ctx.builder.jmp(link);
-    ctx.add_forward_point(nil_link,dst);
+    ctx.add_forward_point(fpCall,dst);
    end else
    begin
     id:=ctx.builder.jmp(nil_link);
-    ctx.add_forward_point(id,dst);
+    ctx.add_forward_point(fpCall,id,dst);
    end;
   end else
   begin
-   op_set_rax_imm(ctx,Int64(dst));
+   op_set_r14_imm(ctx,Int64(dst));
    //
    op_jmp_dispatcher(ctx);
   end;
@@ -605,7 +410,7 @@ begin
   //
   build_lea(ctx,1,new1,[code_ref]);
   //
-  ctx.builder.call_far(@uplift_jit); //in/out:rax uses:r14
+  ctx.builder.call_far(@uplift_jit); //in/out:r14
   //
   ctx.builder.movq(new1,[new1]);
   //
@@ -615,8 +420,7 @@ begin
  begin
   new1:=new_reg_size(r_tmp0,ctx.din.Operand[1]);
   //
-  i:=GetFrameOffset(ctx.din.Operand[1].RegValue[0]);
-  ctx.builder.movq(new1,[r_thrd+i]);
+  op_load(ctx,new1,1);
   //
   op_jmp_dispatcher(ctx);
  end else
@@ -634,7 +438,7 @@ end;
 
 procedure op_jcc(var ctx:t_jit_context2);
 var
- id,id2:t_jit_i_link;
+ id1,id2:t_jit_i_link;
  ofs:Int64;
  dst:Pointer;
  link:t_jit_i_link;
@@ -649,28 +453,110 @@ begin
  begin
   link:=ctx.get_link(dst);
 
+  id1:=ctx.builder.jcc(ctx.din.OpCode.Suffix,link);
+
   if (link<>nil_link) then
   begin
-   ctx.builder.jcc(ctx.din.OpCode.Suffix,link);
-   ctx.add_forward_point(nil_link,dst);
+   ctx.add_forward_point(fpCall,dst);
   end else
   begin
-   id:=ctx.builder.jcc(ctx.din.OpCode.Suffix,nil_link);
-   ctx.add_forward_point(id,dst);
+   ctx.add_forward_point(fpCall,id1,dst);
   end;
  end else
  begin
-  id:=ctx.builder.jcc(ctx.din.OpCode.Suffix,nil_link,os8);
+  id1:=ctx.builder.jcc(ctx.din.OpCode.Suffix,nil_link,os8);
 
   id2:=ctx.builder.jmp(nil_link,os8);
-
-   id._label:=ctx.builder.get_curr_label.after;
-   //
-   op_set_rax_imm(ctx,Int64(dst));
-   //
+   id1._label:=ctx.builder.get_curr_label.after;
+   op_set_r14_imm(ctx,Int64(dst));
    op_jmp_dispatcher(ctx);
-
   id2._label:=ctx.builder.get_curr_label.after;
+ end;
+end;
+
+procedure op_loop(var ctx:t_jit_context2);
+var
+ id1,id2,id3:t_jit_i_link;
+ ofs:Int64;
+ dst:Pointer;
+ link:t_jit_i_link;
+begin
+ ofs:=0;
+ GetTargetOfs(ctx.din,ctx.code,1,ofs);
+
+ dst:=ctx.ptr_next+ofs;
+
+ id1:=ctx.builder.loop(ctx.din.OpCode.Suffix,nil_link,ctx.dis.AddressSize);
+
+ if ctx.is_text_addr(QWORD(dst)) and
+    (not exist_entry(dst)) then
+ begin
+  link:=ctx.get_link(dst);
+
+  id2:=ctx.builder.jmp(nil_link,os8);
+   id1._label:=ctx.builder.get_curr_label.after;
+   id3:=ctx.builder.jmp(nil_link);
+  id2._label:=ctx.builder.get_curr_label.after;
+
+  if (link<>nil_link) then
+  begin
+   ctx.add_forward_point(fpCall,dst);
+  end else
+  begin
+   ctx.add_forward_point(fpCall,id3,dst);
+  end;
+ end else
+ begin
+
+  id2:=ctx.builder.jmp(nil_link,os8);
+   id1._label:=ctx.builder.get_curr_label.after;
+   op_set_r14_imm(ctx,Int64(dst));
+   op_jmp_dispatcher(ctx);
+  id2._label:=ctx.builder.get_curr_label.after;
+
+ end;
+end;
+
+procedure op_jcxz(var ctx:t_jit_context2);
+var
+ id1,id2,id3:t_jit_i_link;
+ ofs:Int64;
+ dst:Pointer;
+ link:t_jit_i_link;
+begin
+ ofs:=0;
+ GetTargetOfs(ctx.din,ctx.code,1,ofs);
+
+ dst:=ctx.ptr_next+ofs;
+
+ id1:=ctx.builder.jcxz(nil_link,ctx.dis.AddressSize);
+
+ if ctx.is_text_addr(QWORD(dst)) and
+    (not exist_entry(dst)) then
+ begin
+  link:=ctx.get_link(dst);
+
+  id2:=ctx.builder.jmp(nil_link,os8);
+   id1._label:=ctx.builder.get_curr_label.after;
+   id3:=ctx.builder.jmp(nil_link);
+  id2._label:=ctx.builder.get_curr_label.after;
+
+  if (link<>nil_link) then
+  begin
+   ctx.add_forward_point(fpCall,dst);
+  end else
+  begin
+   ctx.add_forward_point(fpCall,id3,dst);
+  end;
+ end else
+ begin
+
+  id2:=ctx.builder.jmp(nil_link,os8);
+   id1._label:=ctx.builder.get_curr_label.after;
+   op_set_r14_imm(ctx,Int64(dst));
+   op_jmp_dispatcher(ctx);
+  id2._label:=ctx.builder.get_curr_label.after;
+
  end;
 end;
 
@@ -680,7 +566,6 @@ const
 
 procedure op_push(var ctx:t_jit_context2);
 var
- i:Integer;
  imm:Int64;
  stack,new:TRegValue;
 begin
@@ -695,7 +580,7 @@ begin
   begin
    build_lea(ctx,1,r_tmp0);
 
-   call_far(@uplift_jit); //in/out:rax uses:r14
+   call_far(@uplift_jit); //in/out:r14
 
    new:=new_reg_size(r_tmp1,ctx.din.Operand[1]);
 
@@ -714,8 +599,7 @@ begin
   begin
    new:=new_reg_size(r_tmp1,ctx.din.Operand[1]);
 
-   i:=GetFrameOffset(ctx.din.Operand[1]);
-   movq(new,[r_thrd+i]);
+   op_load(ctx,new,1);
   end else
   begin
    new:=new_reg(ctx.din.Operand[1]);
@@ -736,20 +620,18 @@ begin
    else;
   end;
 
-  i:=GetFrameOffset(rsp);
-  movq(stack,[r_thrd+i]);
+  op_load_rsp(ctx,stack);
   leaq(stack,[stack-OPERAND_BYTES[new.ASize]]);
-  movq([r_thrd+i],stack);
+  op_save_rsp(ctx,stack);
 
-  call_far(@uplift_jit); //in/out:rax uses:r14
+  call_far(@uplift_jit); //in/out:r14
 
   movq([stack],new);
  end;
 end;
 
-procedure op_pushfq(var ctx:t_jit_context2);
+procedure op_pushf(var ctx:t_jit_context2);
 var
- i:Integer;
  mem_size:TOperandSize;
  stack,new:TRegValue;
 begin
@@ -767,20 +649,76 @@ begin
   pushfq(mem_size);
   pop(new);
 
-  i:=GetFrameOffset(rsp);
-  movq(stack,[r_thrd+i]);
+  op_load_rsp(ctx,stack);
   leaq(stack,[stack-OPERAND_BYTES[new.ASize]]);
-  movq([r_thrd+i],stack);
+  op_save_rsp(ctx,stack);
 
-  call_far(@uplift_jit); //in/out:rax uses:r14
+  call_far(@uplift_jit); //in/out:r14
 
   movq([stack],new);
  end;
 end;
 
+procedure op_leave(var ctx:t_jit_context2);
+var
+ new,stack:TRegValue;
+begin
+ //mov rsp,rbp
+ //mov rbp,[rsp]
+ //lea rsp,[rsp+len]
+
+ with ctx.builder do
+ begin
+  stack:=r_tmp0;
+  new  :=r_tmp0;
+
+  op_load_rbp(ctx,stack);
+  op_save_rsp(ctx,stack);
+
+  call_far(@uplift_jit); //in/out:r14
+
+  movq(new,[stack]);
+  op_save_rbp(ctx,new);
+
+  op_load_rsp(ctx,stack);
+  leaq(stack,[stack+OPERAND_BYTES[ctx.dis.OperandSize]]);
+  op_save_rsp(ctx,stack);
+ end;
+
+end;
+
+procedure op_popf(var ctx:t_jit_context2);
+var
+ mem_size:TOperandSize;
+ new,stack:TRegValue;
+begin
+ //mov rflags,[rsp]
+ //lea rsp,[rsp+len]
+
+ with ctx.builder do
+ begin
+  stack:=r_tmp0;
+
+  new:=new_reg_size(r_tmp0,ctx.din.Operand[1]);
+
+  mem_size:=ctx.din.Operand[1].Size;
+
+  op_load_rsp(ctx,stack);
+
+  call_far(@uplift_jit); //in/out:r14
+
+  movq(new,[stack]);
+  push(new);
+  popfq(mem_size);
+
+  op_load_rsp(ctx,stack);
+  leaq(stack,[stack+OPERAND_BYTES[new.ASize]]);
+  op_save_rsp(ctx,stack);
+ end;
+end;
+
 procedure op_pop(var ctx:t_jit_context2);
 var
- i:Integer;
  new,stack:TRegValue;
 begin
  //mov reg,[rsp]
@@ -790,10 +728,9 @@ begin
  begin
   stack:=r_tmp0;
 
-  i:=GetFrameOffset(rsp);
-  movq(stack,[r_thrd+i]);
+  op_load_rsp(ctx,stack);
 
-  call_far(@uplift_jit); //in/out:rax uses:r14
+  call_far(@uplift_jit); //in/out:r14
 
   if is_memory(ctx.din) then
   begin
@@ -803,18 +740,17 @@ begin
 
    build_lea(ctx,1,r_tmp0);
 
-   call_far(@uplift_jit); //in/out:rax uses:r14
+   call_far(@uplift_jit); //in/out:r14
 
    movq([r_tmp0],new);
   end else
   if is_preserved(ctx.din) then
   begin
-   new:=new_reg_size(r_tmp1,ctx.din.Operand[1]);
+   new:=new_reg_size(r_tmp0,ctx.din.Operand[1]);
 
    movq(new,[stack]);
 
-   i:=GetFrameOffset(ctx.din.Operand[1]);
-   movq([r_thrd+i],new);
+   op_save(ctx,1,fix_size(new));
   end else
   begin
    new:=new_reg(ctx.din.Operand[1]);
@@ -822,22 +758,18 @@ begin
    movq(new,[stack]);
   end;
 
-  i:=GetFrameOffset(rsp);
-
-  seto(al);
-  lahf;
-   addi8(os64,[r_thrd+i],OPERAND_BYTES[new.ASize]);
-  addi(al,127);
-  sahf;
+  op_load_rsp(ctx,stack);
+  leaq(stack,[stack+OPERAND_BYTES[new.ASize]]);
+  op_save_rsp(ctx,stack);
  end;
 end;
 
 procedure op_syscall(var ctx:t_jit_context2);
 begin
- ctx.add_forward_point(nil_link,ctx.ptr_curr);
- ctx.add_forward_point(nil_link,ctx.ptr_next);
+ ctx.add_forward_point(fpCall,ctx.ptr_curr);
+ ctx.add_forward_point(fpCall,ctx.ptr_next);
  //
- op_set_rax_imm(ctx,Int64(ctx.ptr_next));
+ op_set_r14_imm(ctx,Int64(ctx.ptr_next));
  //
  ctx.builder.call_far(@jit_syscall); //syscall dispatcher
 end;
@@ -852,6 +784,11 @@ begin
  id:=PByte(ctx.code)[i];
 
  case id of
+  1,3:
+   begin
+    add_orig(ctx);
+   end;
+
   $41: //assert?
    begin
     //
@@ -862,11 +799,13 @@ begin
    begin
     //
     ctx.builder.call_far(@jit_system_error); //TODO error dispatcher
-     ctx.trim:=True;
+    ctx.trim:=True;
    end;
+
   else
    begin
-    Assert(False);
+    ctx.builder.call_far(@jit_unknow_int);
+    ctx.trim:=True;
    end;
  end;
 end;
@@ -875,14 +814,14 @@ procedure op_ud2(var ctx:t_jit_context2);
 begin
  //exit proc?
  ctx.builder.call_far(@jit_exit_proc); //TODO exit dispatcher
-  ctx.trim:=True;
+ ctx.trim:=True;
 end;
 
 procedure op_iretq(var ctx:t_jit_context2);
 begin
  //exit proc?
  ctx.builder.call_far(@jit_exit_proc); //TODO exit dispatcher
-  ctx.trim:=True;
+ ctx.trim:=True;
 end;
 
 procedure op_hlt(var ctx:t_jit_context2);
@@ -899,7 +838,6 @@ end;
 procedure op_rdtsc(var ctx:t_jit_context2);
 begin
  add_orig(ctx);
- op_save_rax(ctx,ctx.builder.rax);
 end;
 
 procedure op_nop(var ctx:t_jit_context2);
@@ -907,255 +845,56 @@ begin
  //align?
 end;
 
-const
- test_desc:t_op_type=(op:$85;index:0);
- bt_desc_imm:t_op_type=(op:$0FBA;index:4);
-
-procedure _op_rep_cmps(var ctx:t_jit_context2;dflag:Integer);
-var
- op:DWORD;
- size:TOperandSize;
-
- link_start:t_jit_i_link;
- link___end:t_jit_i_link;
-
- link_jmp0:t_jit_i_link;
- link_jmp1:t_jit_i_link;
+procedure op_invalid(var ctx:t_jit_context2);
 begin
- //rdi,rsi
- //prefix $67 TODO
-
- op:=$A7;
- case ctx.din.OpCode.Suffix of
-  OPSx_b:
-   begin
-    size:=os8;
-    op:=$A6;
-   end;
-  OPSx_w:size:=os16;
-  OPSx_d:size:=os32;
-  OPSx_q:size:=os64;
-  else;
-   Assert(False);
- end;
-
- //(r_tmp0)rax <-> rdi
- //(r_tmp1)r14 <-> rsi
- with ctx.builder do
- begin
-
-  link_jmp0:=nil_link;
-  link_jmp1:=nil_link;
-
-  link_start:=ctx.builder.get_curr_label.after;
-
-  //repeat
-   seto(al);
-   lahf;
-    _RR(test_desc,rcx,rcx,os0);
-    link_jmp0:=jcc(OPSc_z,nil_link,os8);
-   addi(al,127);
-   sahf;
-
-   movq(r_tmp0,rsi);
-   call_far(@uplift_jit); //in/out:rax uses:r14
-   movq(r_tmp1,r_tmp0);
-
-   movq(r_tmp0,rdi);
-   call_far(@uplift_jit); //in/out:rax uses:r14
-
-   xchgq(rdi,r_tmp0);
-   xchgq(rsi,r_tmp1);
-
-   _O(op,Size);
-
-   xchgq(rdi,r_tmp0);
-   xchgq(rsi,r_tmp1);
-
-   leaq(rcx,[rcx-1]);
-
-   if (dflag=0) then
-   begin
-    leaq(rdi,[rdi+OPERAND_BYTES[size]]);
-    leaq(rsi,[rsi+OPERAND_BYTES[size]]);
-   end else
-   begin
-    leaq(rdi,[rdi-OPERAND_BYTES[size]]);
-    leaq(rsi,[rsi-OPERAND_BYTES[size]]);
-   end;
-
-   if (ifPrefixRepE in ctx.din.Flags) then
-   begin
-    //if a[i]<>b[i] then exit
-    link_jmp1:=jcc(OPSc_nz,nil_link,os8);
-   end else
-   if (ifPrefixRepNe in ctx.din.Flags) then
-   begin
-    //if a[i]=b[i] then exit
-    link_jmp1:=jcc(OPSc_z,nil_link,os8);
-   end;
-
-  //until
-  jmp(link_start,os8);
-
-  //exit1
-  addi(al,127);
-  sahf;
-
-  //exit2
-
-  link___end:=ctx.builder.get_curr_label.before; //exit1
-
-  link_jmp0._label:=link___end;
-
-  link___end:=link___end.after; //exit2
-
-  link_jmp1._label:=link___end;
- end;
-
+ ctx.builder.ud2;
 end;
 
-procedure op_rep_cmps(var ctx:t_jit_context2);
+{
+ //load flags to al,ah
+ seto(al);
+ lahf;
+
+ //store flags from al,ah
+ addi(al,127);
+ sahf;
+}
+
+//
+procedure op_debug_info(var ctx:t_jit_context2);
 var
- link_jmp0:t_jit_i_link;
- link_jmp1:t_jit_i_link;
+ link_jmp:t_jit_i_link;
 begin
- with ctx.builder do
- begin
-
-  //get d flag
-  pushfq(os64);
-  _MI8(bt_desc_imm,os64,[rsp],10); //bt rax, 10
-
-  link_jmp0:=jcc(OPSc_b,nil_link,os8);
-
-  popfq(os64);
-  _op_rep_cmps(ctx,0);
-
-  link_jmp1:=jmp(nil_link,os8);
-
-  link_jmp0._label:=ctx.builder.get_curr_label.after;
-
-  popfq(os64);
-  _op_rep_cmps(ctx,1);
-
-  link_jmp1._label:=ctx.builder.get_curr_label.after;
-
- end;
-end;
-
-///
-
-procedure _op_rep_stos(var ctx:t_jit_context2;dflag:Integer);
-var
- i:Integer;
- size:TOperandSize;
-
- new:TRegValue;
-
- link_start:t_jit_i_link;
- link___end:t_jit_i_link;
-
- link_jmp0:t_jit_i_link;
-begin
- //rdi,rsi
- //prefix $67 TODO
-
- case ctx.din.OpCode.Suffix of
-  OPSx_b:size:=os8;
-  OPSx_w:size:=os16;
-  OPSx_d:size:=os32;
-  OPSx_q:size:=os64;
-  else;
-   Assert(False);
- end;
-
- //(r_tmp0)rax <-> rdi
- //(r_tmp1)r14 <-> rax
- with ctx.builder do
- begin
-
-  link_jmp0:=nil_link;
-
-  new:=new_reg_size(r_tmp1,size);
-
-  i:=GetFrameOffset(rax);
-  movq(new,[r_thrd+i]);
-
-  link_start:=ctx.builder.get_curr_label.after;
-
-  //repeat
-   seto(al);
-   lahf;
-    _RR(test_desc,rcx,rcx,os0);
-    link_jmp0:=jcc(OPSc_z,nil_link,os8);
-   addi(al,127);
-   sahf;
-
-   movq(r_tmp0,rdi);
-   call_far(@uplift_jit); //in/out:rax uses:r14
-
-   movq([r_tmp0],new);
-
-   leaq(rcx,[rcx-1]);
-
-   if (dflag=0) then
-   begin
-    leaq(rdi,[rdi+OPERAND_BYTES[size]]);
-   end else
-   begin
-    leaq(rdi,[rdi-OPERAND_BYTES[size]]);
-   end;
-
-  //until
-  jmp(link_start,os8);
-
-  //exit1
-  sahf;
-
-  //exit2
-
-  link___end:=ctx.builder.get_curr_label.before; //exit1
-
-  link_jmp0._label:=link___end;
- end;
-
-end;
-
-procedure op_rep_stos(var ctx:t_jit_context2);
-var
- link_jmp0:t_jit_i_link;
- link_jmp1:t_jit_i_link;
-begin
- with ctx.builder do
- begin
-
-  //get d flag
-  pushfq(os64);
-  _MI8(bt_desc_imm,os64,[rsp],10); //bt rax, 10
-
-  link_jmp0:=jcc(OPSc_b,nil_link,os8);
-
-  popfq(os64);
-  _op_rep_stos(ctx,0);
-
-  link_jmp1:=jmp(nil_link,os8);
-
-  link_jmp0._label:=ctx.builder.get_curr_label.after;
-
-  popfq(os64);
-  _op_rep_stos(ctx,1);
-
-  link_jmp1._label:=ctx.builder.get_curr_label.after;
-
- end;
+ //debug
+  link_jmp:=ctx.builder.jmp(nil_link,os8);
+  //
+  ctx.builder._O($FA); //cli
+  //op_set_r14_imm(ctx,$FACEADD7);
+  op_set_r14_imm(ctx,Int64(ctx.ptr_curr));
+  add_orig(ctx);
+  op_set_r14_imm(ctx,Int64(ctx.ptr_next));
+  //op_set_r14_imm(ctx,$FACEADDE);
+  ctx.builder._O($FB); //sti
+  //
+  link_jmp._label:=ctx.builder.get_curr_label.after;
+ //debug
 end;
 
 procedure init_cbs;
 begin
+
+ //
+
+ jit_rep_cbs[repOPins ]:=@op_invalid;
+ jit_rep_cbs[repOPouts]:=@op_invalid;
+ jit_rep_cbs[repOPret ]:=@op_ret;
+
+ //
+
  jit_cbs[OPPnone,OPcall,OPSnone]:=@op_call;
  jit_cbs[OPPnone,OPjmp ,OPSnone]:=@op_jmp;
  jit_cbs[OPPnone,OPret ,OPSnone]:=@op_ret;
+ jit_cbs[OPPnone,OPretf,OPSnone]:=@op_ret;
 
  jit_cbs[OPPnone,OPj__,OPSc_o  ]:=@op_jcc;
  jit_cbs[OPPnone,OPj__,OPSc_no ]:=@op_jcc;
@@ -1174,17 +913,31 @@ begin
  jit_cbs[OPPnone,OPj__,OPSc_le ]:=@op_jcc;
  jit_cbs[OPPnone,OPj__,OPSc_nle]:=@op_jcc;
 
+ jit_cbs[OPPnone,OPloop,OPSnone]:=@op_loop;
+ jit_cbs[OPPnone,OPloop,OPSc_ne]:=@op_loop;
+ jit_cbs[OPPnone,OPloop,OPSc_e ]:=@op_loop;
+
+ jit_cbs[OPPnone,OPjcxz ,OPSnone]:=@op_jcxz;
+ jit_cbs[OPPnone,OPjecxz,OPSnone]:=@op_jcxz;
+ jit_cbs[OPPnone,OPjrcxz,OPSnone]:=@op_jcxz;
+
  jit_cbs[OPPnone,OPpush,OPSnone]:=@op_push;
  jit_cbs[OPPnone,OPpop ,OPSnone]:=@op_pop;
 
- jit_cbs[OPPnone,OPpushf ,OPSnone]:=@op_pushfq;
- jit_cbs[OPPnone,OPpushf ,OPSx_q ]:=@op_pushfq;
- //
- //jit_cbs[OPpopf  ,OPSnone]:=@;
- //jit_cbs[OPpopf  ,OPSx_q ]:=@;
+ jit_cbs[OPPnone,OPpushf ,OPSnone]:=@op_pushf;
+ jit_cbs[OPPnone,OPpushf ,OPSx_q ]:=@op_pushf;
+
+ jit_cbs[OPPnone,OPenter ,OPSnone]:=@op_invalid; //TODO
+ jit_cbs[OPPnone,OPleave ,OPSnone]:=@op_leave;
+
+ jit_cbs[OPPnone,OPpopf  ,OPSnone]:=@op_popf;
+ jit_cbs[OPPnone,OPpopf  ,OPSx_q ]:=@op_popf;
 
  jit_cbs[OPPnone,OPsyscall,OPSnone]:=@op_syscall;
  jit_cbs[OPPnone,OPint    ,OPSnone]:=@op_int;
+ jit_cbs[OPPnone,OPint1   ,OPSnone]:=@add_orig;
+ jit_cbs[OPPnone,OPint3   ,OPSnone]:=@add_orig;
+ jit_cbs[OPPnone,OPud1    ,OPSnone]:=@add_orig;
  jit_cbs[OPPnone,OPud2    ,OPSnone]:=@op_ud2;
 
  jit_cbs[OPPnone,OPiret,OPSnone]:=@op_iretq;
@@ -1198,6 +951,18 @@ begin
 
  jit_cbs[OPPnone,OPnop,OPSnone]:=@op_nop;
 
+ jit_cbs[OPPnone,OPin  ,OPSnone]:=@op_invalid;
+ jit_cbs[OPPnone,OPins ,OPSx_b ]:=@op_invalid;
+ jit_cbs[OPPnone,OPins ,OPSx_w ]:=@op_invalid;
+ jit_cbs[OPPnone,OPins ,OPSx_d ]:=@op_invalid;
+
+ jit_cbs[OPPnone,OPout ,OPSnone]:=@op_invalid;
+ jit_cbs[OPPnone,OPouts,OPSx_b ]:=@op_invalid;
+ jit_cbs[OPPnone,OPouts,OPSx_w ]:=@op_invalid;
+ jit_cbs[OPPnone,OPouts,OPSx_d ]:=@op_invalid;
+
+ jit_cbs[OPPnone,OPrdmsr,OPSnone]:=@op_invalid;
+ jit_cbs[OPPnone,OPwrmsr,OPSnone]:=@op_invalid;
 end;
 
 function test_disassemble(addr:Pointer;vsize:Integer):Boolean;
@@ -1241,7 +1006,7 @@ begin
  proc.Free;
 end;
 
-procedure pick(var ctx:t_jit_context2);
+procedure pick(var ctx:t_jit_context2); [public, alias:'kern_jit_pick'];
 begin
  vm_map_lock  (@g_vmspace.vm_map);
 
@@ -1256,7 +1021,8 @@ const
  MCODES:array[0..3] of RawByteString=('','0F','0F38','0F3A');
 label
  _next,
- _build;
+ _build,
+ _invalid;
 var
  addr:Pointer;
  ptr:Pointer;
@@ -1264,9 +1030,8 @@ var
  links:t_jit_context2.t_forward_links;
  entry_link:Pointer;
 
- proc:TDbgProcess;
- adec:TX86AsmDecoder;
- ACodeBytes,ACode:RawByteString;
+ dis:TX86Disassembler;
+ din:TInstruction;
 
  cb:t_jit_cb;
 
@@ -1290,6 +1055,8 @@ begin
  Writeln(' ctx.text___end:0x',HexStr(ctx.text___end,16));
  Writeln(' ctx.map____end:0x',HexStr(ctx.map____end,16));
 
+ print_test_jit_cbs(False,True);
+
  links:=Default(t_jit_context2.t_forward_links);
  addr:=nil;
 
@@ -1303,63 +1070,83 @@ begin
 
  entry_link:=addr;
 
- ctx.builder._new_chunk(QWORD(entry_link));
-
- //debug
-   ctx.builder.call_far(@jit_before_start);
- //debug
+ ctx.new_chunk(links.ptype,entry_link);
 
  ptr:=addr;
 
- proc:=TDbgProcess.Create(dm64);
- adec:=TX86AsmDecoder.Create(proc);
+ dis:=Default(TX86Disassembler);
+ din:=Default(TInstruction);
 
  while True do
  begin
 
   if ((pmap_get_raw(QWORD(ptr)) and PAGE_PROT_EXECUTE)=0) then
   begin
-   //writeln('not excec:0x',HexStr(ptr));
-   ctx.builder.ud2;
-   goto _next; //trim
+   writeln('not excec:0x',HexStr(ptr));
+   goto _invalid;
   end;
 
   ctx.ptr_curr:=ptr;
 
-  adec.Disassemble(ptr,ACodeBytes,ACode);
+  dis.Disassemble(dm64,ptr,din);
 
-  case adec.Instr.OpCode.Opcode of
+  ctx.ptr_next:=ptr;
+
+  case din.OpCode.Opcode of
    OPX_Invalid..OPX_GroupP:
     begin
      //invalid
-     //writeln('invalid:0x',HexStr(ctx.ptr_curr));
+     writeln('invalid1:0x',HexStr(ctx.ptr_curr));
+
+     _invalid:
+
+     begin
+      Writeln('original------------------------':32,' ','0x',HexStr(ctx.ptr_curr));
+      print_disassemble(ctx.ptr_curr,dis.CodeIdx);
+      Writeln('original------------------------':32,' ','0x',HexStr(ptr));
+     end;
+
+     ctx.mark_chunk(fpInvalid);
+
      ctx.builder.ud2;
+
+     link_curr:=ctx.builder.get_curr_label.before;
+     link_next:=ctx.builder.get_curr_label.after;
+
+     cb:=@op_invalid;
+     ctx.trim:=True;
      goto _next; //trim
     end;
    else;
   end;
 
-  if (adec.Instr.Flags * [ifOnly32, ifOnly64, ifOnlyVex] <> []) or
-     is_invalid(adec.Instr) then
+  if (din.Flags * [ifOnly32, ifOnly64, ifOnlyVex] <> []) or
+     (din.ParseFlags * [preF3,preF2] <> []) or
+     is_invalid(din) then
   begin
-   //writeln('invalid:0x',HexStr(ctx.ptr_curr));
-   ctx.builder.ud2;
-   goto _next; //trim
+   writeln('invalid2:0x',HexStr(ctx.ptr_curr));
+   goto _invalid;
   end;
+
+  {
+  if (qword(ctx.ptr_curr) and $FFFFF) = $427F5 then
+  begin
+   print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
 
   if print_asm then
   begin
-   Writeln('original------------------------':32,' ','0x',HexStr(ptr-adec.Disassembler.CodeIdx));
-   Writeln(ACodeBytes:32,' ',ACode);
+   Writeln('original------------------------':32,' ','0x',HexStr(ctx.ptr_curr));
+   print_disassemble(ctx.ptr_curr,dis.CodeIdx);
    Writeln('original------------------------':32,' ','0x',HexStr(ptr));
   end;
 
-  ctx.ptr_next:=ptr;
-
   ctx.code:=ctx.ptr_curr;
 
-  ctx.dis:=adec.Disassembler;
-  ctx.din:=adec.Instr;
+  ctx.dis:=dis;
+  ctx.din:=din;
 
   if is_rep_prefix(ctx.din) then
   begin
@@ -1367,9 +1154,16 @@ begin
    if (ctx.din.OpCode.Prefix=OPPnone) then
    begin
     case ctx.din.OpCode.Opcode of
-     OPcmps:cb:=@op_rep_cmps;
-     OPstos:cb:=@op_rep_stos;
-     else;
+     OPins :cb:=jit_rep_cbs[repOPins ];
+     OPouts:cb:=jit_rep_cbs[repOPouts];
+     OPmovs:cb:=jit_rep_cbs[repOPmovs];
+     OPlods:cb:=jit_rep_cbs[repOPlods];
+     OPstos:cb:=jit_rep_cbs[repOPstos];
+     OPcmps:cb:=jit_rep_cbs[repOPcmps];
+     OPscas:cb:=jit_rep_cbs[repOPscas];
+     OPret :cb:=jit_rep_cbs[repOPret ];
+     else
+            cb:=@op_invalid;
     end;
    end;
   end else
@@ -1377,20 +1171,34 @@ begin
    cb:=jit_cbs[ctx.din.OpCode.Prefix,ctx.din.OpCode.Opcode,ctx.din.OpCode.Suffix];
   end;
 
+  if (cb=@op_invalid) then
+  begin
+   case ctx.get_chunk_ptype of
+    fpData,
+    fpInvalid:
+     begin
+      writeln('skip:0x',HexStr(ctx.ptr_curr));
+      goto _invalid;
+     end
+    else;
+   end;
+  end;
+
   if (cb=nil) then
   begin
-   Writeln('original------------------------':32,' ','0x',HexStr(ptr-adec.Disassembler.CodeIdx));
-   Writeln(ACodeBytes:32,' ',ACode);
+   Writeln('original------------------------':32,' ','0x',HexStr(ctx.ptr_curr));
+   print_disassemble(ctx.ptr_curr,dis.CodeIdx);
    Writeln('original------------------------':32,' ','0x',HexStr(ptr));
 
    Writeln('Unhandled jit:',
-           ctx.din.OpCode.Prefix,' ',
-           ctx.din.OpCode.Opcode,' ',
+           ctx.din.OpCode.Prefix,',',
+           ctx.din.OpCode.Opcode,',',
            ctx.din.OpCode.Suffix,' ',
            ctx.din.Operand[1].Size,' ',
            ctx.din.Operand[2].Size);
-   Writeln('MIndex=',ctx.dis.ModRM.Index,' ',
-           'SOpcode=',ctx.dis.SimdOpcode,':',SCODES[ctx.dis.SimdOpcode],' ',
+   Writeln('opcode=$',HexStr(ctx.dis.opcode,8),' ',
+           'MIndex=',ctx.dis.ModRM.Index,' ',
+           'SimdOp=',ctx.dis.SimdOpcode,':',SCODES[ctx.dis.SimdOpcode],' ',
            'mm=',ctx.dis.mm,':',MCODES[ctx.dis.mm and 3]);
    Assert(false);
   end;
@@ -1424,6 +1232,7 @@ begin
   end;
   }
 
+  //debug print
   if print_asm then
   if (node_curr<>node_next) and
      (node_curr<>nil) then
@@ -1442,13 +1251,120 @@ begin
    Writeln('recompiled----------------------':32,' ','');
   end;
 
+  {
+  if (qword(ptr) and $FFFFF) = $1a710 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+
+  if (qword(ptr) and $FFFFF) = $1a6bd then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
+
+  {
+  if (qword(ptr) and $FFFFF) = $29e53 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+
+  if (qword(ptr) and $FFFFF) = $29e42 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+
+  if (qword(ptr) and $FFFFF) = $29e45 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+
+  if (qword(ptr) and $FFFFF) = $2b8a0 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
+
+  {
+  if (qword(ctx.ptr_curr) and $FFFFF) = $2849d then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
+
+  {
+  if (qword(ctx.ptr_curr) and $FFFFF) = $2f59f then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
+
+  {
+  if (qword(ctx.ptr_curr) and $FFFFF) = $2f1f6 then
+  begin
+   //print_asm:=true;
+   ctx.builder.int3;
+  end;
+  }
+
+  _next:
+
   //debug
-   op_set_rax_imm(ctx,$FACEADD7);
-   op_set_rax_imm(ctx,Int64(ctx.ptr_next));
-   op_set_rax_imm(ctx,$FACEADDE);
+  if (cb<>@op_invalid) then
+  begin
+   op_debug_info(ctx);
+  end;
   //debug
 
+  //resolve forward links
+  if (links.root<>nil) then
   begin
+   links.Resolve(link_curr);
+   links.root:=nil;
+  end;
+
+  //add new entry point
+  if (entry_link<>nil) then
+  begin
+   ctx.add_entry_point(entry_link,link_curr);
+   entry_link:=nil;
+  end;
+
+  //label exist in current blob
+  if not ctx.trim then
+  begin
+   link_new:=ctx.get_link(ctx.ptr_next);
+
+   if (link_new<>nil_link) then
+   begin
+    ctx.builder.jmp(link_new);
+    //Writeln('jmp next:0x',HexStr(ptr));
+    ctx.trim:=True;
+   end;
+  end;
+
+  //entry exist in another blob
+  if not ctx.trim then
+  if exist_entry(ctx.ptr_next) then
+  begin
+   op_set_r14_imm(ctx,Int64(ctx.ptr_next));
+   //
+   op_jmp_dispatcher(ctx);
+   //
+   ctx.trim:=True;
+  end;
+
+  //add new label [link_curr..link_next]
+  begin
+   //update link_next
    link_next:=ctx.builder.get_curr_label.after;
 
    ctx.add_label(ctx.ptr_curr,
@@ -1457,46 +1373,12 @@ begin
                  link_next);
   end;
 
-  if (links.root<>nil) then
-  begin
-   links.Resolve(link_curr);
-   links.root:=nil;
-  end;
-
-  if (entry_link<>nil) then
-  begin
-   ctx.add_entry_point(entry_link,link_curr);
-   entry_link:=nil;
-  end;
-
-  begin
-   link_new:=ctx.get_link(ptr);
-
-   if (link_new<>nil_link) then
-   begin
-    ctx.builder.jmp(link_new);
-    //Writeln('jmp next:0x',HexStr(ptr));
-    goto _next; //trim
-   end;
-  end;
-
-  if exist_entry(ptr) then
-  begin
-   op_set_rax_imm(ctx,Int64(ptr));
-   //
-   op_jmp_dispatcher(ctx);
-   //
-   goto _next; //trim
-  end;
-
   if ctx.trim then
   begin
-   _next:
-
    ctx.trim:=False;
 
    //close chunk
-   ctx.builder._end_chunk(QWORD(ctx.ptr_next));
+   ctx.end_chunk(ctx.ptr_next);
 
    repeat
 
@@ -1522,11 +1404,7 @@ begin
 
    entry_link:=addr;
 
-   ctx.builder._new_chunk(QWORD(entry_link));
-
-   //debug
-    ctx.builder.call_far(@jit_before_start);
-   //debug
+   ctx.new_chunk(links.ptype,entry_link);
 
    ptr:=addr;
   end;
@@ -1541,8 +1419,6 @@ begin
  build(ctx);
  ctx.Free;
 
- adec.Free;
- proc.Free;
 end;
 
 initialization
